@@ -264,9 +264,9 @@
 .upload-panel {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 7px;
   min-width: 0;
-  padding: 11px;
+  padding: 9px;
   background: var(--panel-2);
   transition: background .5s var(--ease-move);
 }
@@ -277,8 +277,8 @@
   align-items: center;
   justify-content: center;
   gap: 2px;
-  min-height: 176px;
-  padding: 16px;
+  min-height: 150px;
+  padding: 14px;
   text-align: center;
   border: 1px dashed var(--outline-strong);
   border-radius: 16px;
@@ -360,9 +360,9 @@
 .settings-panel {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 5px;
   min-width: 0;
-  padding: 11px;
+  padding: 9px;
   border-left: 1px solid var(--outline);
   background: var(--panel);
   overflow-y: auto;
@@ -390,7 +390,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 7px 11px;
+  padding: 5px 10px;
   border: 1px solid var(--outline);
   border-radius: 12px;
   background: var(--field-bg);
@@ -419,8 +419,8 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  min-height: 33px;
-  padding: 4px 11px;
+  min-height: 27px;
+  padding: 3px 11px;
   transition: background .25s var(--ease-move);
 }
 .field:hover { background: var(--press); }
@@ -437,7 +437,7 @@
    but sheds the OS chrome so only the value and a custom chevron remain. */
 .field select {
   max-width: 158px;
-  padding: 5px 22px 5px 8px;
+  padding: 4px 22px 4px 8px;
   border: 0;
   border-radius: 9px;
   color: var(--on-surface);
@@ -468,8 +468,8 @@
   align-items: stretch;
   justify-content: flex-start;
   flex-direction: column;
-  gap: 5px;
-  padding: 8px 11px 9px;
+  gap: 4px;
+  padding: 5px 11px 6px;
 }
 .text-segmented:hover { background: transparent; }
 .segment-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
@@ -497,7 +497,7 @@
   display: grid;
   place-content: center;
   gap: 1px;
-  padding: 6px 6px;
+  padding: 3px 6px;
   border: 0;
   border-radius: 9px;
   color: var(--on-surface-variant);
@@ -507,14 +507,14 @@
   transition: color .35s var(--ease-move), transform .3s var(--ease-move);
 }
 .segment-label {
-  font-size: 10.5px;
+  font-size: 10px;
   font-weight: 700;
   letter-spacing: .08em;
   text-transform: uppercase;
   line-height: 1.15;
 }
 .segment-caption {
-  font-size: 9px;
+  font-size: 8.5px;
   font-weight: 500;
   letter-spacing: 0;
   text-transform: none;
