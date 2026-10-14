@@ -73,7 +73,7 @@
   --accent-container: #2c1a4d;
   --on-accent-container: #e5d4ff;
 
-  --ok: #4ade80;
+  --ok: #34c759;
 
   --page-bg: #110e18;
   --panel: #161120;
@@ -388,7 +388,6 @@
 .format-summary {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 10px;
   padding: 5px 10px;
   border: 1px solid var(--outline);
@@ -397,11 +396,20 @@
   transition: background .5s var(--ease-move), border-color .5s var(--ease-move);
 }
 .format-value {
+  margin-left: auto;
   color: var(--accent-bright);
   font-size: 11.5px;
   font-weight: 600;
   letter-spacing: -.005em;
   text-align: right;
+}
+/* The row's trailing dot, matching the status dot's colour. */
+.format-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
 }
 
 /* iOS "inset grouped" list: rows share one container, hairlines between. */

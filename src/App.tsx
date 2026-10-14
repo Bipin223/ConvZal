@@ -639,6 +639,7 @@ function App() {
           <div className="format-summary">
             <span className="field-label">Format</span>
             <span className="format-value">{CODECS[codec].label} in {CONTAINERS[container].label}</span>
+            <span className="format-dot" />
           </div>
 
         <div className="group">
