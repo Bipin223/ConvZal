@@ -1,23 +1,191 @@
 import { useRef, useState } from 'react'
 import { FFmpeg } from '@ffmpeg/ffmpeg'
 import { fetchFile, toBlobURL } from '@ffmpeg/util'
-import { ALL_FORMATS, BlobSource, BufferTarget, canEncodeVideo, Conversion, Input, Mp4OutputFormat, Output, Quality } from 'mediabunny'
+import {
+  ALL_FORMATS,
+  BlobSource,
+  BufferTarget,
+  canEncodeVideo,
+  Conversion,
+  Input,
+  MkvOutputFormat,
+  MovOutputFormat,
+  Mp4OutputFormat,
+  type OutputFormat,
+  Output,
+  Quality,
+  WebMOutputFormat,
+} from 'mediabunny'
 import './App.css'
 
 declare global {
   interface Window {
     desktopAPI?: {
       getPathForFile: (file: File) => string
-      convertVideo: (options: Record<string, string | number>) => Promise<{ outputPath: string; codec: string }>
+      convertVideo: (options: Record<string, string | number>) => Promise<{ outputPath: string; codec: string; container: string }>
       readOutput: (outputPath: string) => Promise<Uint8Array>
+      onConvertProgress?: (callback: (seconds: number) => void) => () => void
     }
   }
 }
 
 type BrowserRecordingResult = { blob: Blob; mimeType: string }
+type CodecId = 'hevc' | 'avc' | 'av1' | 'vp9'
+type ContainerId = 'mp4' | 'mkv' | 'mov' | 'webm'
+type RateControl = 'crf' | 'bitrate'
+type QualityPreset = 'smallest' | 'balanced' | 'quality'
 
-async function recordBrowserCompatibleVideo(
+const CODEC_ORDER: CodecId[] = ['hevc', 'avc', 'av1', 'vp9']
+const CONTAINER_ORDER: ContainerId[] = ['mp4', 'mkv', 'mov', 'webm']
+
+const CODECS: Record<CodecId, {
+  label: string
+  name: string
+  slug: string
+  containers: ContainerId[]
+  encoders: string[]
+}> = {
+  hevc: { label: 'H.265 / HEVC', name: 'HEVC', slug: 'hevc', containers: ['mp4', 'mkv', 'mov'], encoders: ['libx265'] },
+  avc: { label: 'H.264 / AVC', name: 'H.264', slug: 'h264', containers: ['mp4', 'mkv', 'mov'], encoders: ['libx264'] },
+  av1: { label: 'AV1', name: 'AV1', slug: 'av1', containers: ['mp4', 'mkv', 'webm'], encoders: ['libsvtav1', 'libaom-av1'] },
+  vp9: { label: 'VP9', name: 'VP9', slug: 'vp9', containers: ['mkv', 'webm'], encoders: ['libvpx-vp9'] },
+}
+
+const CONTAINERS: Record<ContainerId, { label: string; extension: string; mimeType: string }> = {
+  mp4: { label: 'MP4', extension: 'mp4', mimeType: 'video/mp4' },
+  mkv: { label: 'MKV', extension: 'mkv', mimeType: 'video/x-matroska' },
+  mov: { label: 'MOV', extension: 'mov', mimeType: 'video/quicktime' },
+  webm: { label: 'WebM', extension: 'webm', mimeType: 'video/webm' },
+}
+
+// Per-encoder speed/quality trade-offs. Without these FFmpeg falls back to defaults
+// that are either glacial (libx265 at medium preset) or noticeably worse per byte.
+const ENCODER_TUNING: Record<string, string[]> = {
+  libx265: ['-preset', 'medium'],
+  libx264: ['-preset', 'fast', '-profile:v', 'high'],
+  libsvtav1: ['-preset', '8'],
+  'libaom-av1': ['-cpu-used', '6', '-row-mt', '1'],
+  'libvpx-vp9': ['-deadline', 'good', '-cpu-used', '2', '-row-mt', '1'],
+}
+
+// MediaRecorder cannot mux every codec into every container, so each container maps to
+// the recorder mime types the browser can actually produce inside that container.
+const RECORDER_MIME_TYPES: Record<ContainerId, string[]> = {
+  mp4: ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4'],
+  mov: ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4'],
+  mkv: ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'],
+  webm: ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'],
+}
+
+const CRF_BY_PRESET: Record<QualityPreset, number> = { smallest: 30, balanced: 23, quality: 18 }
+
+const audioEncoderFor = (container: ContainerId) => (container === 'webm' ? 'libopus' : 'aac')
+
+type FfmpegPlan = {
+  codec: CodecId
+  container: ContainerId
+  encoder: string
+  includeSubtitles: boolean
+}
+
+type FfmpegPlanOptions = FfmpegPlan & {
+  inputPath: string
+  outputPath: string
+  rateControl: RateControl
+  crf: number
+  videoBitrate: number
+  audioBitrate: number
+  resolution: string
+  frameRate: string
+  streamProgress: boolean
+}
+
+function createOutputFormat(container: ContainerId): OutputFormat {
+  if (container === 'mkv') return new MkvOutputFormat()
+  if (container === 'webm') return new WebMOutputFormat()
+  if (container === 'mov') return new MovOutputFormat({ fastStart: 'in-memory' })
+  return new Mp4OutputFormat({ fastStart: 'in-memory' })
+}
+
+function containerForCodec(codec: CodecId, container: ContainerId): ContainerId {
+  return CODECS[codec].containers.includes(container) ? container : CODECS[codec].containers[0]
+}
+
+function codecForContainer(container: ContainerId, codec: CodecId): CodecId {
+  if (CODECS[codec].containers.includes(container)) return codec
+  return CODEC_ORDER.find((candidate) => CODECS[candidate].containers.includes(container)) ?? 'avc'
+}
+
+// Odd frame sizes and 10-bit / 4:4:4 sources are the classic cause of HEVC files that a
+// player shows as one frozen frame, so every encode is forced to even dimensions and 8-bit 4:2:0.
+function buildScaleArgs(resolution: string): string[] {
+  const filters = resolution === 'source' ? [] : [`scale=${resolution}:-2`]
+  filters.push('scale=trunc(iw/2)*2:trunc(ih/2)*2')
+  return ['-vf', filters.join(',')]
+}
+
+function buildFfmpegArgs(options: FfmpegPlanOptions): string[] {
+  const isIsobmff = options.container === 'mp4' || options.container === 'mov'
+  const args = ['-y', '-fflags', '+genpts', '-i', options.inputPath, '-map', '0:v:0', '-map', '0:a?']
+  if (options.includeSubtitles) args.push('-map', '0:s?')
+  args.push('-c:v', options.encoder)
+  if (options.rateControl === 'bitrate') args.push('-b:v', `${options.videoBitrate}k`)
+  else args.push('-crf', String(options.crf))
+  args.push(...(ENCODER_TUNING[options.encoder] ?? []))
+  args.push('-pix_fmt', 'yuv420p')
+  // `hev1` boxes are rejected or mis-seeked by many players; `hvc1` is the compatible tag.
+  if (options.codec === 'hevc' && isIsobmff) args.push('-tag:v', 'hvc1')
+  args.push('-c:a', audioEncoderFor(options.container), '-b:a', `${options.audioBitrate}k`)
+  if (options.includeSubtitles) args.push('-c:s', 'copy')
+  args.push(...buildScaleArgs(options.resolution))
+  if (options.frameRate !== 'source') args.push('-r', String(options.frameRate), '-fps_mode', 'cfr')
+  args.push('-max_muxing_queue_size', '1024')
+  if (isIsobmff) args.push('-movflags', '+faststart')
+  if (options.streamProgress) args.push('-progress', 'pipe:1')
+  args.push(options.outputPath)
+  return args
+}
+
+// Ordered fallback list: the requested codec first (with and without subtitle copy, because
+// `-c:s copy` fails on some inputs), then a universal H.264/MP4 safety net.
+function buildFallbackPlans(codec: CodecId, container: ContainerId): FfmpegPlan[] {
+  const plans: FfmpegPlan[] = []
+  const seen = new Set<string>()
+  const add = (nextCodec: CodecId, nextContainer: ContainerId, includeSubtitles: boolean) => {
+    for (const encoder of CODECS[nextCodec].encoders) {
+      const key = `${encoder}|${nextContainer}|${includeSubtitles}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      plans.push({ codec: nextCodec, container: nextContainer, encoder, includeSubtitles })
+    }
+  }
+  add(codec, container, container !== 'webm')
+  add(codec, container, false)
+  if (codec !== 'avc' || container !== 'mp4') add('avc', 'mp4', false)
+  return plans
+}
+
+// Native progress is reported as raw FFmpeg timestamps, so the source duration is needed
+// to turn them into a percentage.
+function readVideoDuration(file: File): Promise<number> {
+  return new Promise((resolve) => {
+    const video = document.createElement('video')
+    const url = URL.createObjectURL(file)
+    const done = (value: number) => {
+      video.removeAttribute('src')
+      URL.revokeObjectURL(url)
+      resolve(value)
+    }
+    video.preload = 'metadata'
+    video.onloadedmetadata = () => done(Number.isFinite(video.duration) ? video.duration : 0)
+    video.onerror = () => done(0)
+    video.src = url
+  })
+}
+
+function recordBrowserCompatibleVideo(
   file: File,
+  container: ContainerId,
   requestedWidth: number | undefined,
   requestedFrameRate: number | undefined,
   videoBitrate: number,
@@ -28,6 +196,7 @@ async function recordBrowserCompatibleVideo(
   const videoWithCapture = video as HTMLVideoElement & {
     captureStream?: () => MediaStream
     mozCaptureStream?: () => MediaStream
+    requestVideoFrameCallback?: (callback: (now: number, metadata: { mediaTime: number }) => void) => number
   }
   const sourceUrl = URL.createObjectURL(file)
   video.src = sourceUrl
@@ -35,67 +204,115 @@ async function recordBrowserCompatibleVideo(
   video.playsInline = true
   video.preload = 'auto'
 
-  try {
-    await new Promise<void>((resolve, reject) => {
-      video.onloadedmetadata = () => resolve()
-      video.onerror = () => reject(new Error('This browser cannot decode the selected video'))
-    })
-
-    const width = requestedWidth || video.videoWidth || 1280
-    const height = Math.max(2, Math.round((width * (video.videoHeight || 720)) / (video.videoWidth || 1280) / 2) * 2)
-    const canvas = document.createElement('canvas')
-    canvas.width = width
-    canvas.height = height
-    const context = canvas.getContext('2d')
-    const captureStream = videoWithCapture.captureStream?.() || videoWithCapture.mozCaptureStream?.()
-    if (!context || !captureStream) throw new Error('This browser does not support local media capture')
-
-    const frameRate = requestedFrameRate || 30
-    const canvasStream = canvas.captureStream(frameRate)
-    const combinedStream = new MediaStream([
-      ...canvasStream.getVideoTracks(),
-      ...captureStream.getAudioTracks(),
-    ])
-    const mimeTypes = ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4']
-    const mimeType = mimeTypes.find((candidate) => MediaRecorder.isTypeSupported(candidate))
-    if (!mimeType) throw new Error('This browser does not expose a compatible video recorder')
-
-    const chunks: Blob[] = []
-    const recorder = new MediaRecorder(combinedStream, {
-      mimeType,
-      videoBitsPerSecond: videoBitrate * 1000,
-      audioBitsPerSecond: audioBitrate * 1000,
-    })
-    const duration = Math.max(video.duration, 0.1)
+  return new Promise<BrowserRecordingResult>((resolve, reject) => {
     let animationFrame = 0
-    const result = await new Promise<BrowserRecordingResult>((resolve, reject) => {
-      recorder.ondataavailable = (event) => { if (event.data.size > 0) chunks.push(event.data) }
-      recorder.onerror = () => reject(new Error('Browser recording failed'))
-      recorder.onstop = () => resolve({ blob: new Blob(chunks, { type: mimeType }), mimeType })
-      recorder.start(250)
-      void video.play()
+    let watchdog = 0
+    let recorder: MediaRecorder | undefined
+    let finished = false
 
-      const drawFrame = () => {
-        if (video.ended || video.currentTime >= duration) {
-          cancelAnimationFrame(animationFrame)
-          recorder.stop()
-          return
-        }
+    const cleanup = () => {
+      if (animationFrame) cancelAnimationFrame(animationFrame)
+      if (watchdog) window.clearInterval(watchdog)
+      video.pause()
+      video.removeAttribute('src')
+      video.load()
+      URL.revokeObjectURL(sourceUrl)
+    }
+    const fail = (error: Error) => {
+      cleanup()
+      if (recorder && recorder.state !== 'inactive') {
+        try { recorder.stop() } catch { /* the recorder is already gone */ }
+      }
+      reject(error)
+    }
+    const finish = () => {
+      if (finished) return
+      finished = true
+      if (animationFrame) cancelAnimationFrame(animationFrame)
+      if (watchdog) window.clearInterval(watchdog)
+      try { recorder?.stop() } catch { cleanup() }
+    }
+
+    video.onerror = () => fail(new Error('This browser cannot decode the selected video'))
+    video.onloadedmetadata = () => {
+      const width = requestedWidth || video.videoWidth || 1280
+      const height = Math.max(2, Math.round((width * (video.videoHeight || 720)) / (video.videoWidth || 1280) / 2) * 2)
+      const canvas = document.createElement('canvas')
+      canvas.width = width
+      canvas.height = height
+      const context = canvas.getContext('2d')
+      const captureStream = videoWithCapture.captureStream?.() || videoWithCapture.mozCaptureStream?.()
+      if (!context || !captureStream) { fail(new Error('This browser does not support local media capture')); return }
+
+      const frameRate = requestedFrameRate || 30
+      const canvasStream = canvas.captureStream(frameRate)
+      const combinedStream = new MediaStream([...canvasStream.getVideoTracks(), ...captureStream.getAudioTracks()])
+      const mimeType = RECORDER_MIME_TYPES[container].find((candidate) => MediaRecorder.isTypeSupported(candidate))
+      if (!mimeType) { fail(new Error('This browser does not expose a compatible video recorder')); return }
+
+      const chunks: Blob[] = []
+      const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0
+      const paint = () => {
+        if (finished) return
         context.drawImage(video, 0, 0, width, height)
-        onProgress(Math.round((video.currentTime / duration) * 100))
+        if (duration > 0) {
+          const ratio = Math.min(video.currentTime, duration) / duration
+          onProgress(Math.max(0, Math.min(100, Math.round(ratio * 100))))
+        }
+      }
+      const stopTracks = () => {
+        combinedStream.getTracks().forEach((track) => track.stop())
+        captureStream.getTracks().forEach((track) => track.stop())
+      }
+
+      recorder = new MediaRecorder(combinedStream, {
+        mimeType,
+        videoBitsPerSecond: videoBitrate * 1000,
+        audioBitsPerSecond: audioBitrate * 1000,
+      })
+      recorder.ondataavailable = (event) => { if (event.data.size > 0) chunks.push(event.data) }
+      recorder.onerror = () => { stopTracks(); fail(new Error('Browser recording failed')) }
+      recorder.onstop = () => {
+        stopTracks()
+        cleanup()
+        resolve({ blob: new Blob(chunks, { type: mimeType }), mimeType })
+      }
+
+      video.onended = finish
+      paint()
+      recorder.start(250)
+
+      // requestVideoFrameCallback fires once per decoded frame and keeps running while the
+      // window is occluded, whereas requestAnimationFrame is throttled to a standstill and
+      // would stall the canvas stream - freezing the whole output mid-encode.
+      if (typeof videoWithCapture.requestVideoFrameCallback === 'function') {
+        const onFrame = () => {
+          if (finished) return
+          paint()
+          if (video.ended) { finish(); return }
+          videoWithCapture.requestVideoFrameCallback?.(onFrame)
+        }
+        videoWithCapture.requestVideoFrameCallback(onFrame)
+      } else {
+        const drawFrame = () => {
+          if (finished) return
+          if (video.ended) { finish(); return }
+          paint()
+          animationFrame = requestAnimationFrame(drawFrame)
+        }
         animationFrame = requestAnimationFrame(drawFrame)
       }
-      drawFrame()
-    })
 
-    combinedStream.getTracks().forEach((track) => track.stop())
-    captureStream.getTracks().forEach((track) => track.stop())
-    return result
-  } finally {
-    video.pause()
-    video.removeAttribute('src')
-    URL.revokeObjectURL(sourceUrl)
-  }
+      // Safety net for sources whose `ended` event never fires (malformed duration etc.).
+      watchdog = window.setInterval(() => {
+        if (finished) { window.clearInterval(watchdog); return }
+        if (video.ended) finish()
+        else if (duration > 0 && video.currentTime >= duration - 0.05) finish()
+      }, 1000)
+
+      void video.play().catch(() => fail(new Error('This browser blocked local playback for conversion')))
+    }
+  })
 }
 
 function App() {
@@ -103,9 +320,10 @@ function App() {
   const [file, setFile] = useState<File | null>(null)
   const [outputUrl, setOutputUrl] = useState('')
   const [outputName, setOutputName] = useState('')
-  const [outputCodec, setOutputCodec] = useState('hevc')
-  const [quality, setQuality] = useState('balanced')
-  const [rateControl, setRateControl] = useState('crf')
+  const [codec, setCodec] = useState<CodecId>('hevc')
+  const [container, setContainer] = useState<ContainerId>('mp4')
+  const [quality, setQuality] = useState<QualityPreset>('balanced')
+  const [rateControl, setRateControl] = useState<RateControl>('crf')
   const [videoBitrate, setVideoBitrate] = useState('8000')
   const [resolution, setResolution] = useState('source')
   const [frameRate, setFrameRate] = useState('source')
@@ -117,6 +335,12 @@ function App() {
     const hour = new Date().getHours()
     return hour >= 19 || hour < 7
   })
+
+  const crf = CRF_BY_PRESET[quality]
+  const targetWidth = resolution === 'source' ? undefined : Number(resolution)
+  const targetFrameRate = frameRate === 'source' ? undefined : Number(frameRate)
+  const videoBitrateKbps = Number(videoBitrate)
+  const audioBitrateKbps = Number(audioBitrate)
 
   const chooseFile = (nextFile?: File) => {
     if (!nextFile || !nextFile.type.startsWith('video/')) {
@@ -131,82 +355,113 @@ function App() {
     setStatus('Video ready to encode')
   }
 
+  // Containers and codecs must stay mutually valid, so changing one re-homes the other.
+  const chooseCodec = (nextCodec: CodecId) => {
+    setCodec(nextCodec)
+    setContainer((current) => containerForCodec(nextCodec, current))
+  }
+
+  const chooseContainer = (nextContainer: ContainerId) => {
+    setContainer(nextContainer)
+    setCodec((current) => codecForContainer(nextContainer, current))
+  }
+
+  const finishConversion = (resultBlob: Blob, resultCodec: CodecId, resultContainer: ContainerId, sourceName: string) => {
+    if (outputUrl) URL.revokeObjectURL(outputUrl)
+    setOutputUrl(URL.createObjectURL(resultBlob))
+    setOutputName(`${sourceName}-${CODECS[resultCodec].slug}.${CONTAINERS[resultContainer].extension}`)
+    setProgress(100)
+    setStatus(`Done. ${CODECS[resultCodec].label} in ${CONTAINERS[resultContainer].label} is ready.`)
+  }
+
   const convertVideo = async () => {
     if (!file || isBusy) return
     const sourceName = file.name.replace(/\.[^/.]+$/, '')
+    const encodingQuality = rateControl === 'crf'
+      ? new Quality({ quantizer: crf })
+      : new Quality({ bitrate: videoBitrateKbps * 1000, bitrateMode: 'variable' })
     setIsBusy(true)
     setProgress(0)
     setStatus('Loading the local encoder...')
+    let resultCodec = codec
+    let resultContainer = container
+    let resultBlob: Blob | null = null
+    let unsubscribeProgress: (() => void) | undefined
 
     try {
-      const crf = quality === 'smallest' ? 28 : quality === 'quality' ? 18 : 23
-      const encodingQuality = rateControl === 'crf'
-        ? new Quality({ quantizer: crf })
-        : new Quality({ bitrate: Number(videoBitrate) * 1000, bitrateMode: 'variable' })
-      const targetWidth = resolution === 'source' ? undefined : Number(resolution)
-      const targetFrameRate = frameRate === 'source' ? undefined : Number(frameRate)
-      let blob: Blob | null = null
-      let resultCodec = 'hevc'
       if (window.desktopAPI) {
+        const desktop = window.desktopAPI
+        const sourceDuration = await readVideoDuration(file)
         setStatus('Encoding with native FFmpeg...')
-        const nativeResult = await window.desktopAPI.convertVideo({
-          inputPath: window.desktopAPI.getPathForFile(file),
+        unsubscribeProgress = desktop.onConvertProgress?.((seconds) => {
+          if (sourceDuration <= 0) return
+          const ratio = Math.max(0, Math.min(1, seconds / sourceDuration))
+          setProgress(Math.round(ratio * 100))
+          setStatus(`Encoding with native FFmpeg... ${Math.round(ratio * 100)}%`)
+        })
+        const nativeResult = await desktop.convertVideo({
+          inputPath: desktop.getPathForFile(file),
+          codec,
+          container,
           rateControl,
           crf,
-          videoBitrate,
-          audioBitrate,
+          videoBitrate: videoBitrateKbps,
+          audioBitrate: audioBitrateKbps,
           resolution,
           frameRate,
         })
-        const data = await window.desktopAPI.readOutput(nativeResult.outputPath)
-        blob = new Blob([data.buffer as ArrayBuffer], { type: 'video/mp4' })
-        resultCodec = nativeResult.codec
-        setOutputCodec(resultCodec)
-        setOutputName(`${sourceName}-${resultCodec}.mp4`)
-      } else if (await canEncodeVideo('hevc', { quality: encodingQuality })) {
+        const data = await desktop.readOutput(nativeResult.outputPath)
+        resultCodec = nativeResult.codec as CodecId
+        resultContainer = nativeResult.container as ContainerId
+        resultBlob = new Blob([data.buffer as ArrayBuffer], { type: CONTAINERS[resultContainer].mimeType })
+      } else if (await canEncodeVideo(codec, { quality: encodingQuality, width: targetWidth, frameRate: targetFrameRate })) {
         const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
-        const output = new Output({ format: new Mp4OutputFormat(), target: new BufferTarget() })
+        const output = new Output({ format: createOutputFormat(container), target: new BufferTarget() })
         const conversion = await Conversion.init({
           input,
           output,
           tracks: 'all',
-          video: { codec: 'hevc', quality: encodingQuality, forceTranscode: true, width: targetWidth, frameRate: targetFrameRate },
+          video: {
+            codec,
+            quality: encodingQuality,
+            forceTranscode: true,
+            width: targetWidth,
+            frameRate: targetFrameRate,
+            // Short, evenly spaced keyframes keep HEVC/AV1 results seekable in every player.
+            keyFrameInterval: 2,
+          },
           showWarnings: false,
         })
         if (!conversion.isValid) throw new Error('This video does not have a browser-decodable track')
         conversion.onProgress = (nextProgress) => {
           setProgress(Math.max(0, Math.min(100, Math.round(nextProgress * 100))))
-          setStatus('Encoding with the device encoder...')
+          setStatus(`Encoding ${CODECS[codec].name} with the device encoder...`)
         }
         await conversion.execute()
         if (!output.target.buffer) throw new Error('The encoder returned an empty file')
-        blob = new Blob([output.target.buffer], { type: 'video/mp4' })
-        setOutputCodec('hevc')
-        setOutputName(`${sourceName}-hevc.mp4`)
+        resultBlob = new Blob([output.target.buffer], { type: CONTAINERS[container].mimeType })
       } else {
-        let browserRecorded = false
         try {
           setStatus('Using the fast browser compatibility recorder...')
-          const browserResult = await recordBrowserCompatibleVideo(file, targetWidth, targetFrameRate, Number(videoBitrate), Number(audioBitrate), setProgress)
+          const browserResult = await recordBrowserCompatibleVideo(file, container, targetWidth, targetFrameRate, videoBitrateKbps, audioBitrateKbps, setProgress)
           const isMp4 = browserResult.mimeType.startsWith('video/mp4')
-          resultCodec = isMp4 ? 'h264' : 'webm'
-          blob = browserResult.blob
-          setOutputCodec(resultCodec)
-          setOutputName(`${sourceName}-${resultCodec}.${isMp4 ? 'mp4' : 'webm'}`)
-          browserRecorded = true
+          resultCodec = isMp4 ? 'avc' : 'vp9'
+          resultContainer = isMp4 ? 'mp4' : 'webm'
+          resultBlob = browserResult.blob
         } catch (browserError) {
           console.warn('Browser compatibility recorder unavailable', browserError)
         }
+      }
 
-        if (!browserRecorded) {
-          setStatus('Downloading the local fallback encoder...')
-          setProgress(5)
-          const ffmpeg = ffmpegRef.current
-          ffmpeg.on('log', ({ message }) => {
-            const logLine = String(message || '')
-            if (/input|output|encoder|stream|error/i.test(logLine)) setStatus(logLine.slice(-92))
-          })
-          if (!ffmpeg.loaded) {
+      if (!resultBlob) {
+        setStatus('Downloading the local fallback encoder...')
+        setProgress(5)
+        const ffmpeg = ffmpegRef.current
+        ffmpeg.on('log', ({ message }) => {
+          const logLine = String(message || '')
+          if (/input|output|encoder|stream|error/i.test(logLine)) setStatus(logLine.slice(-92))
+        })
+        if (!ffmpeg.loaded) {
           const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm'
           const loadEncoder = async () => {
             const coreURL = await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript')
@@ -218,58 +473,68 @@ function App() {
             loadEncoder(),
             new Promise<never>((_, reject) => setTimeout(() => reject(new Error('The local encoder took too long to load')), 45000)),
           ])
-          }
-          ffmpeg.on('progress', ({ progress: nextProgress }) => {
-            setProgress(Math.max(0, Math.min(100, Math.round(nextProgress * 100))))
-            setStatus('Encoding locally with FFmpeg WASM...')
-          })
-          const inputExtension = file.name.split('.').pop()?.toLowerCase() || 'mp4'
-          const inputName = `input.${inputExtension}`
-          const resizeArgs = targetWidth ? ['-vf', `scale=${targetWidth}:-2`] : []
-          const frameRateArgs = targetFrameRate ? ['-r', String(targetFrameRate)] : []
-          const rateArgs = rateControl === 'crf' ? ['-crf', String(crf)] : ['-b:v', `${videoBitrate}k`]
-          const audioArgs = ['-b:a', `${audioBitrate}k`]
-          await ffmpeg.writeFile(inputName, await fetchFile(file))
-          let fallbackCodec = 'h264'
-          try {
-            await ffmpeg.exec(['-y', '-i', inputName, '-map', '0:v:0', '-map', '0:a?', '-map', '0:s?', '-c:v', 'libx264', ...rateArgs, '-preset', 'fast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', ...audioArgs, '-c:s', 'copy', ...resizeArgs, ...frameRateArgs, '-movflags', '+faststart', 'output.mp4'])
-          } catch {
-            fallbackCodec = 'hevc'
-            setStatus('H.264 is unavailable here. Trying HEVC...')
-            await ffmpeg.exec(['-y', '-i', inputName, '-map', '0:v:0', '-map', '0:a?', '-map', '0:s?', '-c:v', 'libx265', ...rateArgs, '-preset', 'fast', '-tag:v', 'hvc1', '-c:a', 'aac', ...audioArgs, '-c:s', 'copy', ...resizeArgs, ...frameRateArgs, '-movflags', '+faststart', 'output.mp4'])
-          }
-          resultCodec = fallbackCodec
-          const data = await ffmpeg.readFile('output.mp4')
-          const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data
-          blob = new Blob([bytes.buffer as ArrayBuffer], { type: 'video/mp4' })
-          setOutputCodec(fallbackCodec)
-          setOutputName(`${sourceName}-${fallbackCodec}.mp4`)
         }
+        ffmpeg.on('progress', ({ progress: nextProgress }) => {
+          setProgress(Math.max(0, Math.min(100, Math.round(nextProgress * 100))))
+          setStatus(`Encoding ${CODECS[resultCodec].name} locally with FFmpeg WASM...`)
+        })
+
+        const inputExtension = file.name.split('.').pop()?.toLowerCase() || 'mp4'
+        const inputName = `input.${inputExtension}`
+        await ffmpeg.writeFile(inputName, await fetchFile(file))
+
+        // Try the requested target first, then progressively safer combinations. The result is
+        // only accepted once a plan actually produced a file on the virtual filesystem.
+        const plans = buildFallbackPlans(codec, container)
+        let lastError: unknown
+        for (const plan of plans) {
+          const outputName = `output.${CONTAINERS[plan.container].extension}`
+          try {
+            await ffmpeg.exec(buildFfmpegArgs({
+              inputPath: inputName,
+              outputPath: outputName,
+              codec: plan.codec,
+              container: plan.container,
+              encoder: plan.encoder,
+              includeSubtitles: plan.includeSubtitles,
+              rateControl,
+              crf,
+              videoBitrate: videoBitrateKbps,
+              audioBitrate: audioBitrateKbps,
+              resolution,
+              frameRate,
+              streamProgress: false,
+            }))
+            const data = await ffmpeg.readFile(outputName)
+            const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data
+            resultBlob = new Blob([bytes.buffer as ArrayBuffer], { type: CONTAINERS[plan.container].mimeType })
+            resultCodec = plan.codec
+            resultContainer = plan.container
+            lastError = undefined
+            break
+          } catch (planError) {
+            console.warn(`${plan.encoder} into ${plan.container} failed`, planError)
+            lastError = planError
+          }
+        }
+        if (!resultBlob) throw lastError instanceof Error ? lastError : new Error('The local fallback encoder could not process this file')
       }
-      if (!blob) throw new Error('No output file was produced')
-      setOutputUrl(URL.createObjectURL(blob))
-      setProgress(100)
-      setStatus(resultCodec === 'h264' ? 'Done. A compatible H.264 file is ready.' : 'Done. Your HEVC file is ready.')
+
+      finishConversion(resultBlob, resultCodec, resultContainer, sourceName)
     } catch (error) {
       console.error(error)
       try {
         setStatus('Using the browser compatibility recorder...')
-        const compatibilityWidth = resolution === 'source' ? undefined : Number(resolution)
-        const compatibilityFrameRate = frameRate === 'source' ? undefined : Number(frameRate)
-        const browserResult = await recordBrowserCompatibleVideo(file, compatibilityWidth, compatibilityFrameRate, Number(videoBitrate), Number(audioBitrate), setProgress)
+        const browserResult = await recordBrowserCompatibleVideo(file, container, targetWidth, targetFrameRate, videoBitrateKbps, audioBitrateKbps, setProgress)
         const isMp4 = browserResult.mimeType.startsWith('video/mp4')
-        const browserCodec = isMp4 ? 'h264' : 'webm'
-        setOutputCodec(browserCodec)
-        setOutputName(`${sourceName}-${browserCodec}.${isMp4 ? 'mp4' : 'webm'}`)
-        setOutputUrl(URL.createObjectURL(browserResult.blob))
-        setProgress(100)
-        setStatus(isMp4 ? 'Done. A compatible H.264 MP4 is ready.' : 'Done. A compatible WebM file is ready.')
+        finishConversion(browserResult.blob, isMp4 ? 'avc' : 'vp9', isMp4 ? 'mp4' : 'webm', sourceName)
       } catch (fallbackError) {
         console.error(fallbackError)
         setStatus('This browser cannot decode or record this video locally.')
         setProgress(0)
       }
     } finally {
+      unsubscribeProgress?.()
       setIsBusy(false)
     }
   }
@@ -281,7 +546,7 @@ function App() {
         <div className="topbar-actions"><span className="privacy-pill"><span className="status-dot" /> DEVICE-ONLY PROCESSING</span><button className="theme-toggle" type="button" onClick={() => setIsDark((current) => !current)} aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}>{isDark ? '☼' : '◐'}</button></div>
       </header>
       <section className="intro">
-        <div className="eyebrow"><span /> H.265 / HEVC VIDEO OPTIMIZER</div>
+        <div className="eyebrow"><span /> LOCAL VIDEO OPTIMIZER</div>
         <h1>Make your video<br /><em>lighter.</em></h1>
       </section>
       <section className="workspace" aria-label="Video converter">
@@ -297,18 +562,21 @@ function App() {
         </div>
         <aside className="settings-panel">
           <div className="panel-heading"><span>01</span><h2>Output settings</h2></div>
-          <div className="setting-row"><span>Format</span><strong>{outputCodec === 'h264' ? 'H.264 / AVC' : 'H.265 / HEVC'} <i>●</i></strong></div>
-          <div className="setting-row quality-row"><span>Compression</span><div className="quality-options">{['smallest', 'balanced', 'quality'].map((option) => <button type="button" className={quality === option ? 'active' : ''} onClick={() => setQuality(option)} key={option}>{option}</button>)}</div></div>
+          <div className="setting-row"><span>Format</span><strong>{CODECS[codec].label} in {CONTAINERS[container].label} <i>●</i></strong></div>
+
+          <div className="setting-row quality-row"><span>Compression</span><div className="quality-options">{(['smallest', 'balanced', 'quality'] as QualityPreset[]).map((option) => <button type="button" className={quality === option ? 'active' : ''} onClick={() => setQuality(option)} key={option}>{option}</button>)}</div></div>
           <div className="quality-labels"><span>Smallest file</span><span>Best quality</span></div>
           <div className="encoding-controls">
-            <div className="control-heading"><span>Rate control</span><span className="control-hint">{rateControl === 'crf' ? `CRF ${quality === 'smallest' ? 28 : quality === 'quality' ? 18 : 23}` : 'Predictable size'}</span></div>
+            <label className="select-row"><span>Codec</span><select value={codec} onChange={(event) => chooseCodec(event.target.value as CodecId)}>{CODEC_ORDER.map((option) => <option value={option} key={option}>{CODECS[option].label}</option>)}</select></label>
+            <label className="select-row"><span>Container</span><select value={container} onChange={(event) => chooseContainer(event.target.value as ContainerId)}>{CONTAINER_ORDER.map((option) => <option value={option} key={option} disabled={!CODECS[codec].containers.includes(option)}>{CONTAINERS[option].label}</option>)}</select></label>
+            <div className="control-heading"><span>Rate control</span><span className="control-hint">{rateControl === 'crf' ? `CRF ${crf}` : 'Predictable size'}</span></div>
             <div className="rate-options"><button type="button" className={rateControl === 'crf' ? 'active' : ''} onClick={() => setRateControl('crf')}>CRF quality</button><button type="button" className={rateControl === 'bitrate' ? 'active' : ''} onClick={() => setRateControl('bitrate')}>Target bitrate</button></div>
             {rateControl === 'bitrate' && <label className="select-row"><span>Video bitrate</span><select value={videoBitrate} onChange={(event) => setVideoBitrate(event.target.value)}><option value="5000">5 Mbps</option><option value="8000">8 Mbps</option><option value="12000">12 Mbps</option><option value="20000">20 Mbps</option><option value="30000">30 Mbps</option><option value="50000">50 Mbps</option></select></label>}
             <label className="select-row"><span>Resolution</span><select value={resolution} onChange={(event) => setResolution(event.target.value)}><option value="source">Source size</option><option value="1280">720p</option><option value="1920">1080p</option><option value="2560">1440p</option><option value="3840">4K</option></select></label>
             <label className="select-row"><span>Frame rate</span><select value={frameRate} onChange={(event) => setFrameRate(event.target.value)}><option value="source">Source rate</option><option value="24">24 fps</option><option value="25">25 fps</option><option value="30">30 fps</option><option value="50">50 fps</option><option value="60">60 fps</option></select></label>
             <label className="select-row"><span>Audio bitrate</span><select value={audioBitrate} onChange={(event) => setAudioBitrate(event.target.value)}><option value="96">96 kbps</option><option value="128">128 kbps</option><option value="192">192 kbps</option><option value="256">256 kbps</option><option value="320">320 kbps</option></select></label>
           </div>
-          <button className="convert-button" type="button" disabled={!file || isBusy} onClick={convertVideo}><span>{isBusy ? `${progress}%` : 'Convert to HEVC'}</span><span className="button-arrow">↗</span></button>
+          <button className="convert-button" type="button" disabled={!file || isBusy} onClick={convertVideo}><span>{isBusy ? `${progress}%` : `Convert to ${CODECS[codec].name}`}</span><span className="button-arrow">↗</span></button>
           <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
           <p className="status-text">{status}</p>
           {outputUrl && <a className="download-button" href={outputUrl} download={outputName}>Download {outputName} <span>↓</span></a>}

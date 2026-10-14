@@ -1,6 +1,6 @@
 # Local Encode
 
-The browser version uses WebCodecs, Mediabunny, and local FFmpeg fallbacks. The Windows desktop version bundles a native FFmpeg sidecar for reliable HEVC encoding without browser codec restrictions. Files are processed locally and are not uploaded.
+The browser version uses WebCodecs, Mediabunny, and local FFmpeg fallbacks. The Windows desktop version bundles a native FFmpeg sidecar for reliable encoding without browser codec restrictions. Video can be encoded as H.265/HEVC, H.264/AVC, AV1, or VP9 and muxed into an MP4, MKV, MOV, or WebM container. Files are processed locally and are not uploaded.
 
 This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
 
@@ -44,6 +44,18 @@ The workflow in `.github/workflows/deploy.yml` deploys automatically whenever `m
 
 The Vite base path is set automatically from the repository name during the GitHub Actions build.
 
+## Local development
+
+The dev server is pinned to port **5199** with `strictPort` enabled, so run:
+
+```powershell
+npm run dev
+```
+
+and open **http://localhost:5199/**. Override the port with `VITE_PORT` if needed.
+
+The port deliberately does not use Vite's default 5173. Browsers scope service workers, HTTP cache, `localStorage`, and IndexedDB to an origin (scheme + host + port), so two projects sharing a port share that origin — a service worker or cached bundle left behind by another project's dev server on 5173 can then serve content for this app. `strictPort` also means the server exits with an error instead of silently drifting to 5174, which is the usual way projects end up sharing a port.
+
 ## Windows desktop build
 
 The Electron desktop build uses the native FFmpeg executable installed on the machine and packages it into the installer.
@@ -57,6 +69,6 @@ The installer is created at `dist/Local-Encode-0.0.0-Setup.exe`. The generated `
 
 ## Browser support
 
-HEVC encoding depends on the device and browser exposing an HEVC `VideoEncoder` through WebCodecs. Support varies by operating system, hardware, browser version, and installed codec support. The app checks support before conversion and reports when the current device cannot encode HEVC.
+Encoding depends on the device and browser exposing the requested codec through WebCodecs. Support varies by operating system, hardware, browser version, and installed codec support. The app checks support before conversion and reports which encoder it uses.
 
-Devices without native HEVC encoding need a custom x265 WebAssembly build or a server-side FFmpeg fallback. The current app keeps the strict local-processing model and does not upload files.
+When WebCodecs cannot encode the requested codec, the app falls back to a MediaRecorder capture (H.264 MP4 or VP9 WebM) and then to a bundled FFmpeg WebAssembly encoder. The app keeps the strict local-processing model and does not upload files.
