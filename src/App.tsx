@@ -547,7 +547,7 @@ function App() {
       </header>
       <section className="intro">
         <div className="eyebrow"><span /> LOCAL VIDEO OPTIMIZER</div>
-        <h1>Make your video<br /><em>lighter.</em></h1>
+        <h1>Make your video <em>lighter.</em></h1>
       </section>
       <section className="workspace" aria-label="Video converter">
         <div className="upload-panel">
@@ -562,19 +562,23 @@ function App() {
         </div>
         <aside className="settings-panel">
           <div className="panel-heading"><span>01</span><h2>Output settings</h2></div>
-          <div className="setting-row"><span>Format</span><strong>{CODECS[codec].label} in {CONTAINERS[container].label} <i>●</i></strong></div>
+          <div className="setting-row format-row"><span>Format</span><strong>{CODECS[codec].label} in {CONTAINERS[container].label} <i>●</i></strong></div>
 
           <div className="setting-row quality-row"><span>Compression</span><div className="quality-options">{(['smallest', 'balanced', 'quality'] as QualityPreset[]).map((option) => <button type="button" className={quality === option ? 'active' : ''} onClick={() => setQuality(option)} key={option}>{option}</button>)}</div></div>
           <div className="quality-labels"><span>Smallest file</span><span>Best quality</span></div>
           <div className="encoding-controls">
-            <label className="select-row"><span>Codec</span><select value={codec} onChange={(event) => chooseCodec(event.target.value as CodecId)}>{CODEC_ORDER.map((option) => <option value={option} key={option}>{CODECS[option].label}</option>)}</select></label>
-            <label className="select-row"><span>Container</span><select value={container} onChange={(event) => chooseContainer(event.target.value as ContainerId)}>{CONTAINER_ORDER.map((option) => <option value={option} key={option} disabled={!CODECS[codec].containers.includes(option)}>{CONTAINERS[option].label}</option>)}</select></label>
+            <div className="select-grid">
+              <label className="select-row"><span>Codec</span><select value={codec} onChange={(event) => chooseCodec(event.target.value as CodecId)}>{CODEC_ORDER.map((option) => <option value={option} key={option}>{CODECS[option].label}</option>)}</select></label>
+              <label className="select-row"><span>Container</span><select value={container} onChange={(event) => chooseContainer(event.target.value as ContainerId)}>{CONTAINER_ORDER.map((option) => <option value={option} key={option} disabled={!CODECS[codec].containers.includes(option)}>{CONTAINERS[option].label}</option>)}</select></label>
+            </div>
             <div className="control-heading"><span>Rate control</span><span className="control-hint">{rateControl === 'crf' ? `CRF ${crf}` : 'Predictable size'}</span></div>
             <div className="rate-options"><button type="button" className={rateControl === 'crf' ? 'active' : ''} onClick={() => setRateControl('crf')}>CRF quality</button><button type="button" className={rateControl === 'bitrate' ? 'active' : ''} onClick={() => setRateControl('bitrate')}>Target bitrate</button></div>
-            {rateControl === 'bitrate' && <label className="select-row"><span>Video bitrate</span><select value={videoBitrate} onChange={(event) => setVideoBitrate(event.target.value)}><option value="5000">5 Mbps</option><option value="8000">8 Mbps</option><option value="12000">12 Mbps</option><option value="20000">20 Mbps</option><option value="30000">30 Mbps</option><option value="50000">50 Mbps</option></select></label>}
-            <label className="select-row"><span>Resolution</span><select value={resolution} onChange={(event) => setResolution(event.target.value)}><option value="source">Source size</option><option value="1280">720p</option><option value="1920">1080p</option><option value="2560">1440p</option><option value="3840">4K</option></select></label>
-            <label className="select-row"><span>Frame rate</span><select value={frameRate} onChange={(event) => setFrameRate(event.target.value)}><option value="source">Source rate</option><option value="24">24 fps</option><option value="25">25 fps</option><option value="30">30 fps</option><option value="50">50 fps</option><option value="60">60 fps</option></select></label>
-            <label className="select-row"><span>Audio bitrate</span><select value={audioBitrate} onChange={(event) => setAudioBitrate(event.target.value)}><option value="96">96 kbps</option><option value="128">128 kbps</option><option value="192">192 kbps</option><option value="256">256 kbps</option><option value="320">320 kbps</option></select></label>
+            <div className="select-grid">
+              {rateControl === 'bitrate' && <label className="select-row"><span>Video bitrate</span><select value={videoBitrate} onChange={(event) => setVideoBitrate(event.target.value)}><option value="5000">5 Mbps</option><option value="8000">8 Mbps</option><option value="12000">12 Mbps</option><option value="20000">20 Mbps</option><option value="30000">30 Mbps</option><option value="50000">50 Mbps</option></select></label>}
+              <label className="select-row"><span>Resolution</span><select value={resolution} onChange={(event) => setResolution(event.target.value)}><option value="source">Source size</option><option value="1280">720p</option><option value="1920">1080p</option><option value="2560">1440p</option><option value="3840">4K</option></select></label>
+              <label className="select-row"><span>Frame rate</span><select value={frameRate} onChange={(event) => setFrameRate(event.target.value)}><option value="source">Source rate</option><option value="24">24 fps</option><option value="25">25 fps</option><option value="30">30 fps</option><option value="50">50 fps</option><option value="60">60 fps</option></select></label>
+              <label className="select-row"><span>Audio bitrate</span><select value={audioBitrate} onChange={(event) => setAudioBitrate(event.target.value)}><option value="96">96 kbps</option><option value="128">128 kbps</option><option value="192">192 kbps</option><option value="256">256 kbps</option><option value="320">320 kbps</option></select></label>
+            </div>
           </div>
           <button className="convert-button" type="button" disabled={!file || isBusy} onClick={convertVideo}><span>{isBusy ? `${progress}%` : `Convert to ${CODECS[codec].name}`}</span><span className="button-arrow">↗</span></button>
           <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>

@@ -56,6 +56,12 @@ and open **http://localhost:5199/**. Override the port with `VITE_PORT` if neede
 
 The port deliberately does not use Vite's default 5173. Browsers scope service workers, HTTP cache, `localStorage`, and IndexedDB to an origin (scheme + host + port), so two projects sharing a port share that origin — a service worker or cached bundle left behind by another project's dev server on 5173 can then serve content for this app. `strictPort` also means the server exits with an error instead of silently drifting to 5174, which is the usual way projects end up sharing a port.
 
+## Layout
+
+The interface is deliberately built to fit on a single screen. The shell is exactly one viewport tall (`100dvh`) with `overflow: hidden`, the workspace flexes to fill whatever space is left, and the settings panel compacts itself when the window is short (`max-height` queries). From 1024×768 up to 1920×1080 nothing is cut off and no page scrollbar appears — the footer stays visible above the fold.
+
+Two deliberate degradations keep content reachable on smaller viewports: below 760px wide the shell stops forcing a fixed height so the page scrolls normally, and below 660px tall the panel hides the two rows (`Format` and the quality caption) that only repeat what the Codec, Container, and Compression controls already show.
+
 ## Windows desktop build
 
 The Electron desktop build uses the native FFmpeg executable installed on the machine and packages it into the installer.
