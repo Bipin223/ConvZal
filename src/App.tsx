@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useRef, useState, type CSSProperties } from 'react'
 import { FFmpeg } from '@ffmpeg/ffmpeg'
 import { fetchFile, toBlobURL } from '@ffmpeg/util'
 import {
@@ -78,6 +78,9 @@ const RECORDER_MIME_TYPES: Record<ContainerId, string[]> = {
 }
 
 const CRF_BY_PRESET: Record<QualityPreset, number> = { smallest: 30, balanced: 23, quality: 18 }
+
+const QUALITY_ORDER: QualityPreset[] = ['smallest', 'balanced', 'quality']
+const RATE_ORDER: RateControl[] = ['crf', 'bitrate']
 
 const audioEncoderFor = (container: ContainerId) => (container === 'webm' ? 'libopus' : 'aac')
 
@@ -315,6 +318,49 @@ function recordBrowserCompatibleVideo(
   })
 }
 
+function TextSegmented<T extends string>({ label, hint, options, value, onChange, sliding = false }: {
+  label: string
+  hint?: string
+  options: { id: T; label: string; title?: string }[]
+  value: T
+  onChange: (next: T) => void
+  sliding?: boolean
+}) {
+  const activeIndex = Math.max(0, options.findIndex((option) => option.id === value))
+  return (
+    <div className={`field text-segmented ${sliding ? 'sliding' : ''}`}>
+      <div className="segment-heading">
+        <span className="field-label">{label}</span>
+        {hint && <span className="field-hint">{hint}</span>}
+      </div>
+      <div className="segmented" role="group" aria-label={label}>
+        {options.map((option) => (
+          <button
+            type="button"
+            key={option.id}
+            className={option.id === value ? 'segment active' : 'segment'}
+            aria-pressed={option.id === value}
+            title={option.title}
+            onClick={() => onChange(option.id)}
+          >
+            {option.label}
+          </button>
+        ))}
+        {sliding && (
+          <span
+            className="segment-slider"
+            style={{
+              '--seg-count': options.length,
+              '--seg-index': activeIndex,
+            } as CSSProperties}
+            aria-hidden="true"
+          />
+        )}
+      </div>
+    </div>
+  )
+}
+
 function App() {
   const ffmpegRef = useRef(new FFmpeg())
   const [file, setFile] = useState<File | null>(null)
@@ -542,50 +588,167 @@ function App() {
   return (
     <main className={`app-shell ${isDark ? 'dark-mode' : ''}`}>
       <header className="topbar">
-        <a className="brand" href="/" aria-label="Rizal_convert home"><span className="brand-mark">R</span><span>RIZAL_CONVERT</span></a>
-        <div className="topbar-actions"><span className="privacy-pill"><span className="status-dot" /> DEVICE-ONLY PROCESSING</span><button className="theme-toggle" type="button" onClick={() => setIsDark((current) => !current)} aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}>{isDark ? '☼' : '◐'}</button></div>
-      </header>
-      <section className="intro">
-        <div className="eyebrow"><span /> LOCAL VIDEO OPTIMIZER</div>
-        <h1>Make your video <em>lighter.</em></h1>
-      </section>
-      <section className="workspace" aria-label="Video converter">
-        <div className="upload-panel">
-          <label className={`drop-zone ${file ? 'has-file' : ''}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); chooseFile(event.dataTransfer.files[0]) }}>
-            <input type="file" accept="video/*" onChange={(event) => chooseFile(event.target.files?.[0])} />
-            <span className="upload-glyph">↑</span>
-            <strong>{file ? file.name : 'Drop a video here'}</strong>
-            <span>{file ? `${(file.size / (1024 * 1024)).toFixed(1)} MB ready to encode` : 'or click to browse your device'}</span>
-            {!file && <small>MP4, MOV, MKV, AVI and more</small>}
-          </label>
-          <div className="privacy-note"><span className="lock-icon">⌁</span><div><strong>Private by design</strong><span>Processing runs locally with WebAssembly. No upload, no account.</span></div></div>
+        <a className="brand" href="/" aria-label="Rizal_convert home"><span className="brand-mark">R</span><span className="brand-name">Rizal_convert</span></a>
+        <div className="topbar-actions">
+          <span className="privacy-pill" title="Everything runs on this device"><span className="status-dot" /> On-device</span>
+          <button
+            className="theme-toggle"
+            type="button"
+            onClick={() => setIsDark((current) => !current)}
+            aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+          >
+            <span className="theme-icon" key={isDark ? 'sun' : 'moon'}>{isDark ? '☀' : '☾'}</span>
+          </button>
         </div>
+      </header>
+
+      <section className="intro">
+        <h1>Make your video <em>lighter</em></h1>
+        <p>Local H.265 compression. No upload, no account.</p>
+      </section>
+
+      <section className="card" aria-label="Video converter">
+        <div className="upload-panel">
+          <label
+            className={`drop-zone ${file ? 'has-file' : ''}`}
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => { event.preventDefault(); chooseFile(event.dataTransfer.files[0]) }}
+          >
+            <input type="file" accept="video/*" onChange={(event) => chooseFile(event.target.files?.[0])} />
+            <span className="upload-glyph" aria-hidden="true">↑</span>
+            <strong className="drop-title">{file ? file.name : 'Choose a video'}</strong>
+            <small>{file ? `${(file.size / (1024 * 1024)).toFixed(1)} MB ready to encode` : 'Drop it here or tap to browse'}</small>
+          </label>
+          <p className="privacy-note">
+            <span className="lock-icon" aria-hidden="true">⌁</span>
+            Runs locally with WebAssembly. Nothing is uploaded.
+          </p>
+        </div>
+
         <aside className="settings-panel">
           <div className="panel-heading"><span>01</span><h2>Output settings</h2></div>
-          <div className="setting-row format-row"><span>Format</span><strong>{CODECS[codec].label} in {CONTAINERS[container].label} <i>●</i></strong></div>
 
-          <div className="setting-row quality-row"><span>Compression</span><div className="quality-options">{(['smallest', 'balanced', 'quality'] as QualityPreset[]).map((option) => <button type="button" className={quality === option ? 'active' : ''} onClick={() => setQuality(option)} key={option}>{option}</button>)}</div></div>
-          <div className="quality-labels"><span>Smallest file</span><span>Best quality</span></div>
-          <div className="encoding-controls">
-            <div className="select-grid">
-              <label className="select-row"><span>Codec</span><select value={codec} onChange={(event) => chooseCodec(event.target.value as CodecId)}>{CODEC_ORDER.map((option) => <option value={option} key={option}>{CODECS[option].label}</option>)}</select></label>
-              <label className="select-row"><span>Container</span><select value={container} onChange={(event) => chooseContainer(event.target.value as ContainerId)}>{CONTAINER_ORDER.map((option) => <option value={option} key={option} disabled={!CODECS[codec].containers.includes(option)}>{CONTAINERS[option].label}</option>)}</select></label>
+        <div className="group">
+          <TextSegmented
+            label="Compression"
+            hint={rateControl === 'crf' ? `CRF ${crf}` : 'Set bitrate'}
+            options={QUALITY_ORDER.map((option) => ({ id: option, label: option.charAt(0).toUpperCase() + option.slice(1), title: `CRF ${CRF_BY_PRESET[option]}` }))}
+            value={quality}
+            onChange={setQuality}
+            sliding
+          />
+          <div className="divider" />
+          <TextSegmented
+            label="Rate control"
+            hint={rateControl === 'crf' ? 'Quality first' : 'Size first'}
+            options={RATE_ORDER.map((option) => ({ id: option, label: option === 'crf' ? 'CRF' : 'Bitrate', title: option === 'crf' ? 'Constant quality' : 'Target bitrate' }))}
+            value={rateControl}
+            onChange={setRateControl}
+            sliding
+          />
+        </div>
+
+        <div className="group">
+          <label className="field">
+            <span className="field-label">Codec</span>
+            <span className="field-control">
+              <select value={codec} onChange={(event) => chooseCodec(event.target.value as CodecId)}>
+                {CODEC_ORDER.map((option) => <option value={option} key={option}>{CODECS[option].label}</option>)}
+              </select>
+            </span>
+          </label>
+          <div className="divider" />
+          <label className="field">
+            <span className="field-label">Container</span>
+            <span className="field-control">
+              <select value={container} onChange={(event) => chooseContainer(event.target.value as ContainerId)}>
+                {CONTAINER_ORDER.map((option) => <option value={option} key={option} disabled={!CODECS[codec].containers.includes(option)}>{CONTAINERS[option].label}</option>)}
+              </select>
+            </span>
+          </label>
+          {rateControl === 'bitrate' && (
+            <>
+              <div className="divider" />
+              <label className="field">
+                <span className="field-label">Video bitrate</span>
+                <span className="field-control">
+                  <select value={videoBitrate} onChange={(event) => setVideoBitrate(event.target.value)}>
+                    <option value="5000">5 Mbps</option>
+                    <option value="8000">8 Mbps</option>
+                    <option value="12000">12 Mbps</option>
+                    <option value="20000">20 Mbps</option>
+                    <option value="30000">30 Mbps</option>
+                    <option value="50000">50 Mbps</option>
+                  </select>
+                </span>
+              </label>
+            </>
+          )}
+        </div>
+
+        <div className="group">
+          <label className="field">
+            <span className="field-label">Resolution</span>
+            <span className="field-control">
+              <select value={resolution} onChange={(event) => setResolution(event.target.value)}>
+                <option value="source">Source size</option>
+                <option value="1280">720p</option>
+                <option value="1920">1080p</option>
+                <option value="2560">1440p</option>
+                <option value="3840">4K</option>
+              </select>
+            </span>
+          </label>
+          <div className="divider" />
+          <label className="field">
+            <span className="field-label">Frame rate</span>
+            <span className="field-control">
+              <select value={frameRate} onChange={(event) => setFrameRate(event.target.value)}>
+                <option value="source">Source rate</option>
+                <option value="24">24 fps</option>
+                <option value="25">25 fps</option>
+                <option value="30">30 fps</option>
+                <option value="50">50 fps</option>
+                <option value="60">60 fps</option>
+              </select>
+            </span>
+          </label>
+          <div className="divider" />
+          <label className="field">
+            <span className="field-label">Audio</span>
+            <span className="field-control">
+              <select value={audioBitrate} onChange={(event) => setAudioBitrate(event.target.value)}>
+                <option value="96">96 kbps</option>
+                <option value="128">128 kbps</option>
+                <option value="192">192 kbps</option>
+                <option value="256">256 kbps</option>
+                <option value="320">320 kbps</option>
+              </select>
+            </span>
+          </label>
+        </div>
+
+        <div className="action-zone">
+          <button className="convert-button" type="button" disabled={!file || isBusy} onClick={convertVideo}>
+            <span className="convert-label">{isBusy ? 'Encoding' : `Convert to ${CODECS[codec].name}`}</span>
+            <span className="button-arrow" aria-hidden="true">{isBusy ? `${progress}%` : '→'}</span>
+          </button>
+          {isBusy && (
+            <div className="progress-track" role="progressbar" aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100} aria-label="Conversion progress">
+              <span style={{ transform: `scaleX(${progress / 100})` }} />
             </div>
-            <div className="control-heading"><span>Rate control</span><span className="control-hint">{rateControl === 'crf' ? `CRF ${crf}` : 'Predictable size'}</span></div>
-            <div className="rate-options"><button type="button" className={rateControl === 'crf' ? 'active' : ''} onClick={() => setRateControl('crf')}>CRF quality</button><button type="button" className={rateControl === 'bitrate' ? 'active' : ''} onClick={() => setRateControl('bitrate')}>Target bitrate</button></div>
-            <div className="select-grid">
-              {rateControl === 'bitrate' && <label className="select-row"><span>Video bitrate</span><select value={videoBitrate} onChange={(event) => setVideoBitrate(event.target.value)}><option value="5000">5 Mbps</option><option value="8000">8 Mbps</option><option value="12000">12 Mbps</option><option value="20000">20 Mbps</option><option value="30000">30 Mbps</option><option value="50000">50 Mbps</option></select></label>}
-              <label className="select-row"><span>Resolution</span><select value={resolution} onChange={(event) => setResolution(event.target.value)}><option value="source">Source size</option><option value="1280">720p</option><option value="1920">1080p</option><option value="2560">1440p</option><option value="3840">4K</option></select></label>
-              <label className="select-row"><span>Frame rate</span><select value={frameRate} onChange={(event) => setFrameRate(event.target.value)}><option value="source">Source rate</option><option value="24">24 fps</option><option value="25">25 fps</option><option value="30">30 fps</option><option value="50">50 fps</option><option value="60">60 fps</option></select></label>
-              <label className="select-row"><span>Audio bitrate</span><select value={audioBitrate} onChange={(event) => setAudioBitrate(event.target.value)}><option value="96">96 kbps</option><option value="128">128 kbps</option><option value="192">192 kbps</option><option value="256">256 kbps</option><option value="320">320 kbps</option></select></label>
-            </div>
-          </div>
-          <button className="convert-button" type="button" disabled={!file || isBusy} onClick={convertVideo}><span>{isBusy ? `${progress}%` : `Convert to ${CODECS[codec].name}`}</span><span className="button-arrow">↗</span></button>
-          <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
-          <p className="status-text">{status}</p>
-          {outputUrl && <a className="download-button" href={outputUrl} download={outputName}>Download {outputName} <span>↓</span></a>}
+          )}
+          <p className="status-text" aria-live="polite">{status}</p>
+          {outputUrl && (
+            <a className="download-button" href={outputUrl} download={outputName}>
+              <span className="download-label">Download {outputName}</span>
+              <span aria-hidden="true">↓</span>
+            </a>
+          )}
+        </div>
         </aside>
       </section>
+
       <footer className="footer-note">Made by Bipin Rizal</footer>
     </main>
   )
