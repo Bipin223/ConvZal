@@ -1,6 +1,6 @@
 /* Base layer only: every component-level rule lives in App.css, which owns
-   the light/dark tokens too. Kept free of a background colour of its own so
-   the shell's tonal surface shows through on overscroll. */
+   the light/dark tokens too. No background colour of its own here, so the
+   shell's tonal surface shows through on overscroll. */
 * { box-sizing: border-box; }
 
 html, body, #root { height: 100%; }
@@ -8,12 +8,9 @@ html, body, #root { height: 100%; }
 body {
   margin: 0;
   min-width: 320px;
-  background: #f0f1f5;
-  color: #1b1c1e;
-}
-
-@media (prefers-color-scheme: dark) {
-  body { background: #1c1b1f; color: #e6e1e9; }
+  color-scheme: dark;
+  background: #110e18;
+  color: #edeaf4;
 }
 
 button, input, select { font: inherit; }

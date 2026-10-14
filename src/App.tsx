@@ -321,12 +321,13 @@ function recordBrowserCompatibleVideo(
 function TextSegmented<T extends string>({ label, hint, options, value, onChange, sliding = false }: {
   label: string
   hint?: string
-  options: { id: T; label: string; title?: string }[]
+  options: { id: T; label: string; title?: string; caption?: string }[]
   value: T
   onChange: (next: T) => void
   sliding?: boolean
 }) {
   const activeIndex = Math.max(0, options.findIndex((option) => option.id === value))
+  const hasCaptions = options.some((option) => option.caption)
   return (
     <div className={`field text-segmented ${sliding ? 'sliding' : ''}`}>
       <div className="segment-heading">
@@ -343,7 +344,8 @@ function TextSegmented<T extends string>({ label, hint, options, value, onChange
             title={option.title}
             onClick={() => onChange(option.id)}
           >
-            {option.label}
+            <span className="segment-label">{option.label}</span>
+            {hasCaptions && option.caption && <span className="segment-caption">{option.caption}</span>}
           </button>
         ))}
         {sliding && (
@@ -377,10 +379,7 @@ function App() {
   const [status, setStatus] = useState('Ready for a video')
   const [progress, setProgress] = useState(0)
   const [isBusy, setIsBusy] = useState(false)
-  const [isDark, setIsDark] = useState(() => {
-    const hour = new Date().getHours()
-    return hour >= 19 || hour < 7
-  })
+  const [isDark, setIsDark] = useState(true)
 
   const crf = CRF_BY_PRESET[quality]
   const targetWidth = resolution === 'source' ? undefined : Number(resolution)
@@ -588,9 +587,15 @@ function App() {
   return (
     <main className={`app-shell ${isDark ? 'dark-mode' : ''}`}>
       <header className="topbar">
-        <a className="brand" href="/" aria-label="Rizal_convert home"><span className="brand-mark">R</span><span className="brand-name">Rizal_convert</span></a>
+        <a className="brand" href="/" aria-label="Rizal_convert home">
+          <span className="brand-mark">R</span>
+          <span className="brand-text">
+            <span className="brand-name">RIZAL_CONVERT</span>
+            <span className="brand-sub">LOCAL VIDEO OPTIMIZER</span>
+          </span>
+        </a>
         <div className="topbar-actions">
-          <span className="privacy-pill" title="Everything runs on this device"><span className="status-dot" /> On-device</span>
+          <span className="privacy-pill" title="Everything runs on this device"><span className="status-dot" /> DEVICE-ONLY PROCESSING</span>
           <button
             className="theme-toggle"
             type="button"
@@ -603,8 +608,8 @@ function App() {
       </header>
 
       <section className="intro">
-        <h1>Make your video <em>lighter</em></h1>
-        <p>Local H.265 compression. No upload, no account.</p>
+        <h1>Make your video <em>lighter</em>.</h1>
+        <p>Shrink it locally, keep the quality. Nothing leaves this device.</p>
       </section>
 
       <section className="card" aria-label="Video converter">
@@ -616,23 +621,36 @@ function App() {
           >
             <input type="file" accept="video/*" onChange={(event) => chooseFile(event.target.files?.[0])} />
             <span className="upload-glyph" aria-hidden="true">↑</span>
-            <strong className="drop-title">{file ? file.name : 'Choose a video'}</strong>
-            <small>{file ? `${(file.size / (1024 * 1024)).toFixed(1)} MB ready to encode` : 'Drop it here or tap to browse'}</small>
+            <strong className="drop-title">{file ? file.name : 'Drop a video here'}</strong>
+            <small>{file ? `${(file.size / (1024 * 1024)).toFixed(1)} MB ready to encode` : 'or click to browse your device'}</small>
+            {!file && <small className="drop-formats">MP4, MOV, MKV, AVI and more</small>}
           </label>
-          <p className="privacy-note">
+          <div className="privacy-note">
             <span className="lock-icon" aria-hidden="true">⌁</span>
-            Runs locally with WebAssembly. Nothing is uploaded.
-          </p>
+            <span>
+              <strong>Private by design</strong>
+              <small>Processing runs locally with WebAssembly. No upload, no account.</small>
+            </span>
+          </div>
         </div>
 
         <aside className="settings-panel">
           <div className="panel-heading"><span>01</span><h2>Output settings</h2></div>
+          <div className="format-summary">
+            <span className="field-label">Format</span>
+            <span className="format-value">{CODECS[codec].label} in {CONTAINERS[container].label}</span>
+          </div>
 
         <div className="group">
           <TextSegmented
             label="Compression"
             hint={rateControl === 'crf' ? `CRF ${crf}` : 'Set bitrate'}
-            options={QUALITY_ORDER.map((option) => ({ id: option, label: option.charAt(0).toUpperCase() + option.slice(1), title: `CRF ${CRF_BY_PRESET[option]}` }))}
+            options={QUALITY_ORDER.map((option) => ({
+              id: option,
+              label: option,
+              title: `CRF ${CRF_BY_PRESET[option]}`,
+              caption: option === 'smallest' ? 'Smallest file' : option === 'quality' ? 'Best quality' : '',
+            }))}
             value={quality}
             onChange={setQuality}
             sliding
@@ -641,7 +659,12 @@ function App() {
           <TextSegmented
             label="Rate control"
             hint={rateControl === 'crf' ? 'Quality first' : 'Size first'}
-            options={RATE_ORDER.map((option) => ({ id: option, label: option === 'crf' ? 'CRF' : 'Bitrate', title: option === 'crf' ? 'Constant quality' : 'Target bitrate' }))}
+            options={RATE_ORDER.map((option) => ({
+              id: option,
+              label: option === 'crf' ? 'CRF' : 'Bitrate',
+              title: option === 'crf' ? 'Constant quality' : 'Target bitrate',
+              caption: option === 'crf' ? 'CRF quality' : 'Target bitrate',
+            }))}
             value={rateControl}
             onChange={setRateControl}
             sliding
@@ -670,7 +693,7 @@ function App() {
             <>
               <div className="divider" />
               <label className="field">
-                <span className="field-label">Video bitrate</span>
+                <span className="field-label">Target bitrate</span>
                 <span className="field-control">
                   <select value={videoBitrate} onChange={(event) => setVideoBitrate(event.target.value)}>
                     <option value="5000">5 Mbps</option>
@@ -715,7 +738,7 @@ function App() {
           </label>
           <div className="divider" />
           <label className="field">
-            <span className="field-label">Audio</span>
+            <span className="field-label">Audio bitrate</span>
             <span className="field-control">
               <select value={audioBitrate} onChange={(event) => setAudioBitrate(event.target.value)}>
                 <option value="96">96 kbps</option>
