@@ -602,7 +602,18 @@ function App() {
             onClick={() => setIsDark((current) => !current)}
             aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
           >
-            <span className="theme-icon" key={isDark ? 'sun' : 'moon'}>{isDark ? '☀' : '☾'}</span>
+            <span className="theme-icon" key={isDark ? 'sun' : 'moon'}>
+              {isDark ? (
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <circle cx="12" cy="12" r="4.1" />
+                  <path d="M12 2.2v2.6M12 19.2v2.6M2.2 12h2.6M19.2 12h2.6M5.1 5.1l1.8 1.8M17.1 17.1l1.8 1.8M18.9 5.1l-1.8 1.8M6.9 17.1l-1.8 1.8" />
+                </svg>
+              ) : (
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M20.7 14.2A8.7 8.7 0 0 1 9.8 3.3a8.7 8.7 0 1 0 10.9 10.9Z" />
+                </svg>
+              )}
+            </span>
           </button>
         </div>
       </header>

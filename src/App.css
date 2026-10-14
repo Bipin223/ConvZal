@@ -214,9 +214,20 @@
 .theme-icon {
   display: grid;
   place-items: center;
-  font-size: 15px;
   line-height: 1;
   animation: icon-swap .45s var(--ease-settle) both;
+}
+/* Outlined SVG rather than a font glyph: the reference's sun is hollow with
+   eight rays, and a glyph would re-shape itself per platform font. */
+.theme-icon svg {
+  display: block;
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 /* ----------------------------------------------------------------- intro */
