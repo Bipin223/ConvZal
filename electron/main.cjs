@@ -4,6 +4,7 @@ const fs = require('node:fs/promises')
 const fsSync = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
+const { createLanServer } = require('./lan-server.cjs')
 
 /* ==========================================================================
    Codec / container matrix
@@ -350,12 +351,14 @@ function cancelConversion(requestId) {
    Conversion
    ========================================================================== */
 
-async function convertVideo(event, options) {
+// Progress arrives as a callback rather than through an IPC sender, because the same engine
+// now serves two callers: the desktop window and the phone-facing server, which has no
+// webContents to send to.
+async function convertVideo(options, onProgress) {
   const requestId = options.requestId || `req-${Date.now()}`
   const requested = resolveFormat(options)
   const reportProgress = (seconds) => {
-    if (!requestId) return
-    if (!event.sender.isDestroyed()) event.sender.send('native-convert-progress', { requestId, seconds })
+    if (typeof onProgress === 'function') onProgress(seconds)
   }
 
   const detected = options.hardware ? await detectHardware() : {}
@@ -409,7 +412,12 @@ async function convertVideo(event, options) {
         }
       }
       lastError = new Error('FFmpeg finished without writing an output file')
+      await fs.rm(outputPath, { force: true }).catch(() => {})
     } catch (error) {
+      // A failed or cancelled attempt leaves a half-written file. It is not a conversion
+      // result, so it never stays behind next to the user's video (or in the phone temp
+      // folder, where it would pile up until sharing was switched off).
+      await fs.rm(outputPath, { force: true }).catch(() => {})
       if (error && error.cancelled) throw error
       lastError = error
     }
@@ -551,8 +559,69 @@ async function listDirectory(targetPath, includeNonVideo) {
    IPC
    ========================================================================== */
 
+/* ==========================================================================
+   Preferences that outlive the window
+
+   Sharing used to be a switch that had to be found again after every restart,
+   which made the phone address useless as a bookmark. Remembering it is what
+   turns "open the app, flip a switch, scan a code" into "open the app, then use
+   the link the phone already saved".
+   ========================================================================== */
+
+const prefs = { shareOnLaunch: false }
+
+function prefsFile() {
+  return path.join(app.getPath('userData'), 'convzal-settings.json')
+}
+
+function loadPrefs() {
+  try {
+    const parsed = JSON.parse(fsSync.readFileSync(prefsFile(), 'utf8'))
+    prefs.shareOnLaunch = parsed.shareOnLaunch === true
+  } catch { /* first run, or a hand-edited file: the defaults are fine */ }
+  return prefs
+}
+
+function savePrefs() {
+  try {
+    fsSync.mkdirSync(path.dirname(prefsFile()), { recursive: true })
+    fsSync.writeFileSync(prefsFile(), JSON.stringify(prefs, null, 2))
+  } catch (error) {
+    console.log(`[prefs] could not write settings: ${error.message}`)
+  }
+}
+
+/* ==========================================================================
+   Phone sharing
+
+   The desktop app can hand the same native engine to anything else on the
+   Wi-Fi: the phone sends a file, this PC encodes it, the phone downloads the
+   result. The server only exists while the user has it switched on.
+   ========================================================================== */
+
+const lanServer = createLanServer({
+  convert: convertVideo,
+  cancel: cancelConversion,
+  probe: probeMediaFile,
+  log: (message) => console.log(`[share] ${message}`),
+})
+
+function shareState() {
+  return {
+    ok: true,
+    ...lanServer.state(),
+    shareOnLaunch: prefs.shareOnLaunch,
+  }
+}
+
+function asResult(error) {
+  return { ok: false, error: error instanceof Error ? error.message : String(error) }
+}
+
 function registerIpc() {
-  ipcMain.handle('native-convert', (event, options) => convertVideo(event, options))
+  ipcMain.handle('native-convert', (event, options) => convertVideo(options, (seconds) => {
+    if (!event.sender.isDestroyed()) event.sender.send('native-convert-progress', { requestId: options.requestId, seconds })
+  }))
   ipcMain.handle('native-convert-cancel', (_event, requestId) => cancelConversion(requestId))
   ipcMain.handle('read-output', async (_event, outputPath) => fs.readFile(outputPath))
 
@@ -621,6 +690,30 @@ function registerIpc() {
     home: os.homedir(),
     bundled: app.isPackaged,
   }))
+
+  // ---------------------------------------------------------- phone sharing
+  ipcMain.handle('share:state', () => shareState())
+  ipcMain.handle('share:start', async () => {
+    try {
+      const state = await lanServer.start()
+      // Left on means "on again next launch": that is the whole point of the switch.
+      prefs.shareOnLaunch = true
+      savePrefs()
+      return { ...shareState(), ...state }
+    } catch (error) {
+      return asResult(error)
+    }
+  })
+  ipcMain.handle('share:stop', async () => {
+    try {
+      const state = await lanServer.stop()
+      prefs.shareOnLaunch = false
+      savePrefs()
+      return { ...shareState(), ...state }
+    } catch (error) {
+      return asResult(error)
+    }
+  })
 }
 
 /* ==========================================================================
@@ -647,11 +740,26 @@ function createWindow() {
   else window.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false))
+  loadPrefs()
   registerIpc()
+  // Resumed before the window is shown, so the panel never flashes "off" for a user who
+  // left it on. A port clash is not fatal: the app still opens, the panel just reports it.
+  if (prefs.shareOnLaunch) {
+    try {
+      await lanServer.start()
+      console.log('[share] resumed on launch')
+    } catch (error) {
+      console.log(`[share] could not resume: ${error.message}`)
+    }
+  }
   createWindow()
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
 })
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
+
+// Best effort: close the listening socket and delete the shared temp folder so nothing is
+// left behind in %TEMP% after the window is gone.
+app.on('before-quit', () => { void lanServer.stop().catch(() => {}) })

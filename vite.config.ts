@@ -12,7 +12,11 @@ const devPort = Number(process.env.VITE_PORT) || 5199
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
-  base: process.env.VITE_BASE_PATH || '/',
+  // The Pages workflow sets an absolute base (`/Web_convert/`) and that is exactly right for
+  // a site served from a subfolder. Everywhere else - most of all the desktop app, which
+  // loads dist/index.html over `file://` - an absolute base points at the drive root and the
+  // window comes up blank. Relative URLs resolve correctly in both places.
+  base: process.env.VITE_BASE_PATH || './',
   server: {
     port: devPort,
     strictPort: true,

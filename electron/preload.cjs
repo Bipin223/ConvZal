@@ -24,4 +24,9 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   showItemInFolder: (targetPath) => ipcRenderer.invoke('shell:show-item', targetPath),
 
   appInfo: () => ipcRenderer.invoke('app:info'),
+
+  // Phone sharing: serve this converter to the local Wi-Fi while it is switched on
+  shareState: () => ipcRenderer.invoke('share:state'),
+  startSharing: () => ipcRenderer.invoke('share:start'),
+  stopSharing: () => ipcRenderer.invoke('share:stop'),
 })

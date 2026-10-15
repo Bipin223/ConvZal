@@ -396,6 +396,23 @@
 .lock-icon { display: grid; place-items: center; flex: 0 0 auto; width: 26px; height: 26px; border-radius: 9px; color: var(--accent-bright); background: var(--accent-container); }
 .lock-icon svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 
+/* Phone sharing: the QR is the whole point, so it gets a white card of its own - a code
+   drawn on the dark surface is hard for a camera to lock onto. */
+.share-panel { display: grid; gap: 8px; }
+.share-card {
+  display: flex; align-items: center; gap: 12px; padding: 10px 11px;
+  border: 1px solid var(--outline); border-radius: 14px; background: var(--field-bg);
+}
+.share-qr { width: 92px; height: 92px; flex: 0 0 auto; border-radius: 10px; background: #fff; }
+.share-qr-empty { background: var(--surface-container-high); }
+.share-copy { display: grid; gap: 4px; min-width: 0; flex: 1 1 auto; }
+.share-url {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12.5px;
+  color: var(--accent-bright); overflow-wrap: anywhere;
+}
+.share-actions { display: flex; gap: 8px; }
+.share-hint { color: var(--on-surface-faint); font-size: 10px; line-height: 1.35; }
+
 /* ------------------------------------------------------------ settings */
 .settings-panel {
   display: flex;

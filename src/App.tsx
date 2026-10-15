@@ -75,6 +75,18 @@ type DirectoryHandleLike = {
   }>
 }
 
+// State of the little HTTP server that lets a phone on the same Wi-Fi hand a video to this
+// PC and take the converted file back.
+type ShareState = {
+  ok: boolean
+  running?: boolean
+  port?: number
+  url?: string
+  addresses?: { name: string; url: string }[]
+  error?: string
+  shareOnLaunch?: boolean
+}
+
 interface DesktopApi {
   getPathForFile: (file: File) => string
   convertVideo: (options: Record<string, unknown>) => Promise<{
@@ -97,6 +109,9 @@ interface DesktopApi {
   openPath: (targetPath: string) => Promise<string>
   showItemInFolder: (targetPath: string) => Promise<boolean>
   appInfo: () => Promise<{ platform: string; home: string; bundled: boolean }>
+  shareState: () => Promise<ShareState>
+  startSharing: () => Promise<ShareState>
+  stopSharing: () => Promise<ShareState>
 }
 
 declare global {
@@ -709,6 +724,11 @@ function App() {
   // which every Chromium has in software). When there is none, HEVC cannot be encoded in
   // the browser: Chromium ships no software HEVC encoder and uses hardware only.
   const [hasHardwareEncoder, setHasHardwareEncoder] = useState<boolean | null>(null)
+  // Phone sharing (desktop only): the URL the phone should open, and a QR for it.
+  const [share, setShare] = useState<ShareState>({ ok: true, running: false })
+  const [shareBusy, setShareBusy] = useState(false)
+  const [shareQrImage, setShareQrImage] = useState({ url: '', dataUrl: '' })
+  const [shareCopied, setShareCopied] = useState(false)
 
   const crfPreset = CRF_PRESETS.find((preset) => preset.crf === crf && !lossless)?.id
 
@@ -736,6 +756,9 @@ function App() {
     && typeof navigator !== 'undefined'
     && typeof navigator.canShare === 'function'
     && typeof navigator.share === 'function'
+  // The QR image is stored together with the URL it was drawn for, so a stale code is never
+  // shown next to a new address.
+  const shareQr = share.running && shareQrImage.url === (share.url || '') ? shareQrImage.dataUrl : ''
 
   /* ---------------------------------------------------------- lifecycle */
 
@@ -753,6 +776,59 @@ function App() {
     }).catch(() => {})
     return () => { cancelled = true }
   }, [])
+
+  /* ------------------------------------------------------ phone sharing */
+
+  const toggleSharing = useCallback(async (next: boolean) => {
+    const api = desktop()
+    if (!api) return
+    setShareBusy(true)
+    setShareCopied(false)
+    try {
+      const state = next ? await api.startSharing() : await api.stopSharing()
+      setShare(state)
+      if (!state.ok) setStatus(`Could not share: ${state.error || 'the port may be taken'}`)
+      else if (next && state.url) setStatus(`Your phone can open ${state.url}`)
+      else setStatus('Ready when you are')
+    } catch (error) {
+      setShare({ ok: false, running: false, error: error instanceof Error ? error.message : String(error) })
+    } finally {
+      setShareBusy(false)
+    }
+  }, [])
+
+  const copyShareUrl = useCallback(async () => {
+    const url = share.url
+    if (!url) return
+    try {
+      await navigator.clipboard.writeText(url)
+      setShareCopied(true)
+      setTimeout(() => setShareCopied(false), 2000)
+    } catch { /* the clipboard can be blocked; the URL is on screen either way */ }
+  }, [share.url])
+
+  // A reload of the window keeps the server running inside the main process, so the panel
+  // asks for the current state instead of assuming it is off.
+  useEffect(() => {
+    const api = desktop()
+    if (!api) return
+    let cancelled = false
+    void api.shareState().then((next) => { if (!cancelled) setShare(next) }).catch(() => {})
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
+    const url = share.running ? share.url : ''
+    if (!url) return
+    let cancelled = false
+    // Imported on demand: only the desktop panel ever needs a QR encoder, so the website
+    // never downloads it.
+    void import('qrcode')
+      .then((module) => module.toDataURL(url, { margin: 1, width: 220, color: { dark: '#0d0a15', light: '#ffffff' } }))
+      .then((dataUrl) => { if (!cancelled) setShareQrImage({ url, dataUrl }) })
+      .catch(() => { /* no QR: the URL is still on screen to type */ })
+    return () => { cancelled = true }
+  }, [share.running, share.url])
 
   useEffect(() => {
     if (NATIVE_BUILD) return
@@ -1260,6 +1336,48 @@ function App() {
               <small>{desktopMode ? 'Encoded on this PC by the bundled FFmpeg. No upload, no account.' : 'Runs locally with WebAssembly. No upload, no account.'}</small>
             </span>
           </div>
+
+          {desktopMode && (
+            <div className="share-panel">
+              <Switch
+                checked={Boolean(share.running)}
+                onChange={(next) => void toggleSharing(next)}
+                disabled={shareBusy}
+                label="Use it from your phone"
+                hint="The phone sends the video over your Wi-Fi and this PC encodes it"
+              />
+
+              {share.running && share.url && (
+                <div className="share-card">
+                  {shareQr
+                    ? <img className="share-qr" src={shareQr} alt={`QR code that opens ${share.url}`} />
+                    : <span className="share-qr share-qr-empty" aria-hidden="true" />}
+                  <span className="share-copy">
+                    <span className="field-label">Scan, or open on the phone</span>
+                    <code className="share-url">{share.url}</code>
+                    <span className="share-actions">
+                      <button type="button" className="ghost-button" onClick={() => void copyShareUrl()}>
+                        {shareCopied ? 'Copied' : 'Copy link'}
+                      </button>
+                    </span>
+                    <small className="share-hint">
+                      Scan once and bookmark the link on the phone — the switch is remembered, so sharing is already on next time.
+                    </small>
+                    <small className="share-hint">
+                      Same Wi-Fi needed. If Windows asks about the firewall, allow ConvZal on private networks.
+                    </small>
+                    {share.addresses && share.addresses.length > 1 && (
+                      <small className="share-hint">
+                        Other addresses: {share.addresses.slice(1, 4).map((entry) => entry.url).join(' · ')}
+                      </small>
+                    )}
+                  </span>
+                </div>
+              )}
+
+              {share.ok === false && share.error && <p className="panel-note warn-note">{share.error}</p>}
+            </div>
+          )}
         </div>
 
         {/* ------------------------------------------------ settings pane */}
