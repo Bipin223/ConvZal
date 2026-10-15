@@ -2,6 +2,8 @@
 
 ConvZal converts video and extracts audio entirely on your own device. The browser version uses WebCodecs, Mediabunny, and a local FFmpeg core for audio; the Windows desktop version bundles a native FFmpeg sidecar for reliable encoding without browser codec restrictions, and can hand that same engine to a phone on the local Wi-Fi. Video can be encoded as H.265/HEVC, H.264/AVC, AV1, or VP9 and muxed into an MP4, MKV, MOV, or WebM container, and audio can be extracted to an **M4A** (AAC). Files are processed locally and are not uploaded.
 
+**Live:** <https://bipin223.github.io/ConvZal/> — the browser version, nothing to install. Every push to `main` builds and deploys it through `.github/workflows/deploy.yml`.
+
 ## Controls
 
 - **What to keep** — *Video* keeps picture and sound; *Audio only (M4A)* drops the video and writes the soundtrack as AAC in an `.m4a` (plays on phones, cars and editors).
