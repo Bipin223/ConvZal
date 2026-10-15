@@ -15,7 +15,11 @@ Two long-standing freeze causes are handled explicitly: the decoder `-progress` 
 
 ## Phones and playback
 
-The in-browser build offers **H.264 · MP4** only, encoded with your device's own hardware encoder. That is deliberate: H.264 is the one codec that both encodes quickly through WebCodecs *and* plays on essentially every phone, TV and chat app. HEVC, AV1 and VP9 have no usable WebCodecs encoder on most devices, so they fell back to a WebAssembly encoder that needed minutes for an ordinary phone clip — the "it finished instantly and the file was a mess / it never finished" trap. Those codecs remain available in the **desktop app**, which bundles native FFmpeg. When the device exposes the Web Share API, the result card also offers **Save to device** so the file can be saved straight into Photos / Files instead of relying on a blob download.
+In the browser every codec (H.265/HEVC, H.264/AVC, AV1, VP9) stays selectable. When the device has a WebCodecs encoder for the chosen codec it is used — that is the fast path — and when it does not, ConvZal falls back to its bundled software FFmpeg. The panel says which codecs will use the software encoder, because a software H.265 encode of a phone clip takes minutes rather than seconds. The **desktop app** always uses native FFmpeg, so it is the fastest option for H.265 and AV1.
+
+Whatever the path, the result is **checked before it is shown**: ConvZal reads the produced file back (container, video codec, audio track, duration) and refuses to present it if it is empty, truncated, or in a different codec than the one requested. Sizes are shown as a change against the original ("31% smaller", "about the same size") so a conversion can never be mistaken for "nothing happened".
+
+When the device exposes the Web Share API, the result card also offers **Save to device** so the file can be saved straight into Photos / Files instead of relying on a blob download.
 
 The empty drop zone is a real `<label>` bound to a visually-hidden file input, so a tap opens the operating system's picker even on browsers that ignore a scripted `.click()` on a `display: none` input. Below 800px the two panes stack and the page scrolls normally — no fixed-height grid, which used to collapse the upload pane to zero height on a phone.
 

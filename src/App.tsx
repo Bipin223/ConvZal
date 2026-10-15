@@ -65,6 +65,7 @@ type ConvertResult = {
   codecName: string
   containerName: string
   outputDir?: string
+  sizeNote?: string
 }
 
 type DirectoryHandleLike = {
@@ -113,12 +114,10 @@ const CONTAINER_ORDER: ContainerId[] = ['mp4', 'mkv', 'mov', 'webm']
 
 const NATIVE_BUILD = typeof window !== 'undefined' && Boolean(window.desktopAPI)
 
-// Only H.264 has a WebCodecs encoder on essentially every device. HEVC, AV1 and VP9
-// usually fall back to a WebAssembly encoder that is far too slow for a real file
-// (minutes for a phone clip), so the browser build offers H.264 only. The desktop
-// build bundles FFmpeg and keeps the full list.
-const BROWSER_CODECS: CodecId[] = ['avc']
-const AVAILABLE_CODECS: CodecId[] = NATIVE_BUILD ? CODEC_ORDER : BROWSER_CODECS
+// Every codec stays selectable everywhere. In the browser a codec without a WebCodecs
+// encoder (usually HEVC / AV1 / VP9) is handled by the bundled software encoder; the UI
+// says which ones are slow, and the result is verified before it is handed over.
+const AVAILABLE_CODECS: CodecId[] = CODEC_ORDER
 
 const CODECS: Record<CodecId, { label: string; name: string; slug: string; containers: ContainerId[] }> = {
   hevc: { label: 'H.265 / HEVC', name: 'HEVC', slug: 'hevc', containers: ['mp4', 'mkv', 'mov'] },
@@ -194,6 +193,15 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 ** exponent).toFixed(exponent === 0 ? 0 : 1)} ${units[exponent]}`
 }
 
+// How the output size compares with the input, so a conversion is never mistaken for
+// "nothing happened". Reports smaller/larger, or "about the same size".
+function sizeChange(from: number, to: number): string | undefined {
+  if (!from || !to) return undefined
+  const ratio = (to - from) / from
+  if (Math.abs(ratio) < 0.01) return 'about the same size'
+  return ratio < 0 ? `${Math.round(-ratio * 100)}% smaller` : `${Math.round(ratio * 100)}% larger`
+}
+
 function formatDuration(seconds: number) {
   if (!Number.isFinite(seconds) || seconds <= 0) return '—'
   const total = Math.round(seconds)
@@ -261,6 +269,75 @@ function probeBlob(file: File): Promise<{ duration: number; width: number; heigh
     video.onerror = () => done(0, 0, 0)
     video.src = url
   })
+}
+
+/* ------------------------------------------------------- output check */
+
+type MediaInspection = {
+  videoCodec: string | null
+  audioCodec: string | null
+  hasVideo: boolean
+  hasAudio: boolean
+  duration: number
+  width: number
+  height: number
+}
+
+// Reads what a produced file actually contains. Mediabunny parses the container, so this
+// works even for a codec the browser itself cannot play back (such as HEVC).
+async function inspectMedia(blob: Blob): Promise<MediaInspection> {
+  const input = new Input({ source: new BlobSource(blob), formats: ALL_FORMATS })
+  try {
+    const videoTrack = await input.getPrimaryVideoTrack()
+    const audioTrack = await input.getPrimaryAudioTrack()
+    const duration = (await input.getDurationFromMetadata().catch(() => null))
+      ?? (await input.computeDuration().catch(() => 0))
+    return {
+      videoCodec: videoTrack?.codec ?? null,
+      audioCodec: audioTrack?.codec ?? null,
+      hasVideo: Boolean(videoTrack),
+      hasAudio: Boolean(audioTrack),
+      duration: Number.isFinite(duration) ? duration : 0,
+      width: videoTrack?.displayWidth ?? 0,
+      height: videoTrack?.displayHeight ?? 0,
+    }
+  } finally {
+    input.dispose()
+  }
+}
+
+// This is the guard for "it says Download but there was no conversion". A half-written
+// file, a stale file left in the encoder's memory, or a fallback that quietly used a
+// different codec all get rejected here, so the caller can try the next encoder instead of
+// presenting garbage as success.
+function assertConverted(actual: MediaInspection, expected: { codec?: CodecId; audioOnly: boolean; duration: number; label: string }) {
+  if (expected.audioOnly) {
+    if (!actual.hasAudio) throw new Error(`${expected.label} produced no audio`)
+    return
+  }
+  if (!actual.hasVideo) throw new Error(`${expected.label} produced no video`)
+  if (expected.codec && actual.videoCodec && actual.videoCodec !== expected.codec) {
+    throw new Error(`${expected.label} produced ${actual.videoCodec.toUpperCase()} instead of ${CODECS[expected.codec].name}`)
+  }
+  if (actual.duration <= 0) throw new Error(`${expected.label} produced an empty file`)
+  if (expected.duration > 1) {
+    const tolerance = Math.max(1.5, expected.duration * 0.25)
+    if (Math.abs(actual.duration - expected.duration) > tolerance) {
+      throw new Error(`${expected.label} stopped early: ${actual.duration.toFixed(1)}s of ${expected.duration.toFixed(1)}s`)
+    }
+  }
+}
+
+// ffmpeg.wasm resolves exec() with the process exit code and does NOT reject on a failed
+// command. Without this check a crashed encode silently handed back whatever file happened
+// to still be lying around in its memory - the exact "it finished in a second and the video
+// is a mess" bug. Clear the target first so a stale file can never be returned.
+async function runFfmpeg(ffmpeg: FFmpeg, args: string[], outputName: string): Promise<Uint8Array> {
+  await ffmpeg.deleteFile(outputName).catch(() => { /* nothing to remove */ })
+  const exitCode = await ffmpeg.exec(args)
+  if (exitCode !== 0) throw new Error(`FFmpeg exited with code ${exitCode}`)
+  const data = await ffmpeg.readFile(outputName)
+  return typeof data === 'string' ? new TextEncoder().encode(data) : data
 }
 
 /* ------------------------------------------------------ encoder arg (wasm) */
@@ -655,10 +732,10 @@ function App() {
   const [source, setSource] = useState<Source | null>(null)
   const [result, setResult] = useState<ConvertResult | null>(null)
 
-  // H.264 is the only codec that plays on essentially every phone, TV and app, so the
-  // in-browser (and therefore mobile) build defaults to it. The desktop build has a
-  // full FFmpeg and defaults to the smaller HEVC.
-  const [codec, setCodec] = useState<CodecId>(() => (NATIVE_BUILD ? 'hevc' : 'avc'))
+  // H.265 is the point of the app (it shrinks a file the most), so it is the default
+  // everywhere. When the browser has no HEVC hardware encoder the panel says it will fall
+  // back to the bundled software encoder, which is slower but still produces real H.265.
+  const [codec, setCodec] = useState<CodecId>('hevc')
   const [container, setContainer] = useState<ContainerId>('mp4')
   const [rateMode, setRateMode] = useState<RateMode>('crf')
   const [lossless, setLossless] = useState(false)
@@ -681,6 +758,9 @@ function App() {
   const [elapsed, setElapsed] = useState(0)
   const [isDark, setIsDark] = useState(true)
   const [desktopMode, setDesktopMode] = useState(false)
+  // Codecs this browser cannot encode in hardware, so they fall back to the slower
+  // software encoder. Surfaced in the panel so nobody waits for a slow encode by surprise.
+  const [softwareCodecs, setSoftwareCodecs] = useState<CodecId[]>([])
 
   const crfPreset = CRF_PRESETS.find((preset) => preset.crf === crf && !lossless)?.id
 
@@ -705,6 +785,19 @@ function App() {
     const api = desktop()
     if (!api) return
     void api.appInfo().then(() => { if (!cancelled) setDesktopMode(true) }).catch(() => {})
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
+    if (NATIVE_BUILD) return
+    let cancelled = false
+    void (async () => {
+      const results = await Promise.all(CODEC_ORDER.map(async (candidate) => {
+        const supported = await canEncodeVideo(candidate).catch(() => false)
+        return [candidate, supported] as const
+      }))
+      if (!cancelled) setSoftwareCodecs(results.filter(([, supported]) => !supported).map(([candidate]) => candidate))
+    })()
     return () => { cancelled = true }
   }, [])
 
@@ -828,6 +921,7 @@ function App() {
       codecName: output.codecName,
       containerName: output.containerName,
       outputDir: saved ? outputHandleRef.current?.name : undefined,
+      sizeNote: sizeChange(source?.size ?? 0, blob.size),
     }
   }, [source])
 
@@ -869,7 +963,14 @@ function App() {
         }
         await conversion.execute()
         if (!output.target.buffer) throw new Error('The encoder returned an empty file')
-        return finalizeBrowser(new Blob([output.target.buffer], { type: CONTAINERS[container].mimeType }), videoOutput(codec, container))
+        const produced = new Blob([output.target.buffer], { type: CONTAINERS[container].mimeType })
+        assertConverted(await inspectMedia(produced), {
+          codec,
+          audioOnly: false,
+          duration: source?.duration ?? 0,
+          label: 'The device encoder',
+        })
+        return finalizeBrowser(produced, videoOutput(codec, container))
       } catch (deviceError) {
         console.warn('Device encoder unavailable, falling back to FFmpeg WASM', deviceError)
       }
@@ -897,10 +998,10 @@ function App() {
       if (audioOnly) {
         setStatus('Extracting the audio locally with FFmpeg…')
         const outputName = `output.${AUDIO_OUTPUT.extension}`
-        await ffmpeg.exec(buildWasmAudioArgs({ inputName, outputName, audioBitrate: Number(audioBitrate) }))
-        const data = await ffmpeg.readFile(outputName)
-        const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data
-        return finalizeBrowser(new Blob([bytes.buffer as ArrayBuffer], { type: AUDIO_OUTPUT.mimeType }), AUDIO_OUTPUT)
+        const bytes = await runFfmpeg(ffmpeg, buildWasmAudioArgs({ inputName, outputName, audioBitrate: Number(audioBitrate) }), outputName)
+        const blob = new Blob([bytes.buffer as ArrayBuffer], { type: AUDIO_OUTPUT.mimeType })
+        assertConverted(await inspectMedia(blob), { audioOnly: true, duration: source?.duration ?? 0, label: 'The audio encoder' })
+        return finalizeBrowser(blob, AUDIO_OUTPUT)
       }
       const plans = buildWasmPlans(codec, container)
       let lastError: unknown
@@ -908,7 +1009,7 @@ function App() {
         const outputName = `output.${CONTAINERS[plan.container].extension}`
         try {
           setStatus(`Encoding ${CODECS[plan.codec].name} locally with FFmpeg…`)
-          await ffmpeg.exec(buildWasmArgs({
+          const bytes = await runFfmpeg(ffmpeg, buildWasmArgs({
             codec: plan.codec,
             container: plan.container,
             encoder: plan.encoder,
@@ -923,16 +1024,22 @@ function App() {
             speed,
             inputName,
             outputName,
-          }))
-          const data = await ffmpeg.readFile(outputName)
-          const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data
-          return finalizeBrowser(new Blob([bytes.buffer as ArrayBuffer], { type: CONTAINERS[plan.container].mimeType }), videoOutput(plan.codec, plan.container))
+          }), outputName)
+          const blob = new Blob([bytes.buffer as ArrayBuffer], { type: CONTAINERS[plan.container].mimeType })
+          assertConverted(await inspectMedia(blob), {
+            codec: plan.codec,
+            audioOnly: false,
+            duration: source?.duration ?? 0,
+            label: 'The local encoder',
+          })
+          return finalizeBrowser(blob, videoOutput(plan.codec, plan.container))
         } catch (planError) {
           console.warn(`${plan.encoder} into ${plan.container} failed`, planError)
           lastError = planError
         }
       }
-      throw lastError instanceof Error ? lastError : new Error('The local encoder could not process this file')
+      console.error('Every local encoder failed', lastError)
+      throw new Error('this file could not be decoded — it may be damaged, or use a codec this device cannot read')
     } finally {
       ffmpeg.off('progress', onProgress)
     }
@@ -984,6 +1091,7 @@ function App() {
             codecName: codecDisplayName(nativeResult.codec),
             containerName: containerDisplayName(nativeResult.container),
             outputDir: outputDir || undefined,
+            sizeNote: sizeChange(source.size, nativeResult.size),
           })
           setStatus(`Done — ${containerDisplayName(nativeResult.container)} written to disk`)
         } finally {
@@ -1323,12 +1431,18 @@ function App() {
             </label>
           </div>
 
-          {!desktopMode && (
+          {!desktopMode && (softwareCodecs.includes(codec) ? (
             <p className="panel-note">
-              The browser encodes <strong>H.264</strong> with your device's own hardware encoder, so it is fast and the
-              result plays on every phone, TV and app. The <strong>desktop app</strong> adds HEVC, AV1 and VP9.
+              This browser has no <strong>{CODECS[codec].name}</strong> hardware encoder, so ConvZal uses its bundled
+              software encoder. It produces a real {CODECS[codec].name} file, but it is slow — minutes for a long clip.
+              <strong> H.264</strong> stays fast here, and the <strong>desktop app</strong> does {CODECS[codec].name} in seconds.
             </p>
-          )}
+          ) : (
+            <p className="panel-note">
+              <strong>{CODECS[codec].name}</strong> is encoded by your device's own encoder, so it stays quick and the
+              file never leaves this computer.
+            </p>
+          ))}
 
           <div className="field-row">
             <label className="field">
@@ -1404,7 +1518,7 @@ function App() {
                   </span>
                   <span className="result-copy">
                     <strong title={result.name}>{result.name}</strong>
-                    <small>{result.sizeLabel} · {result.codecName} · {result.containerName}</small>
+                    <small>{result.sizeLabel}{result.sizeNote ? ` (${result.sizeNote})` : ''} · {result.codecName} · {result.containerName}</small>
                   </span>
                 </div>
                 <div className="result-actions">
