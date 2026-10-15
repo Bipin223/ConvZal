@@ -2,6 +2,16 @@
 
 The browser version uses WebCodecs, Mediabunny, and local FFmpeg fallbacks. The Windows desktop version bundles a native FFmpeg sidecar for reliable encoding without browser codec restrictions. Video can be encoded as H.265/HEVC, H.264/AVC, AV1, or VP9 and muxed into an MP4, MKV, MOV, or WebM container. Files are processed locally and are not uploaded.
 
+## Controls
+
+- **Rate control** — either a CRF quality slider (0–51, where a higher number means a smaller file) or a target bitrate. Quick chips set the usual CRF 32 / 23 / 18 points.
+- **Lossless** — a switch that encodes bit-exactly (H.265 `lossless=1`, H.264 `-qp 0`, VP9/AV1 lossless). Files are very large; it is off by default.
+- **Encoding effort** — Fast / Balanced / Thorough maps onto each encoder's own preset (`libx265` `faster`→`slow`, SVT-AV1 10→6, and so on), which is the single biggest speed lever.
+- **Use the GPU** — on the desktop build, attempts NVENC / QuickSync / AMF first and silently falls back to the CPU encoder when no GPU answers. Never used for lossless.
+- **Save to** — the built-in folder browser (with breadcrumbs, an Up button, drive list and shortcuts) or the Windows folder dialog chooses the output location. The desktop result card adds **Show in folder**, **Play**, and **Save a copy**.
+
+Two long-standing freeze causes are handled explicitly: the decoder `-progress` pipe is always drained (an unread pipe used to deadlock FFmpeg), and the first *real* video stream is mapped with `0:V:0` so a cover-art / attached-picture track can no longer produce a one-frame file.
+
 This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
 
 Currently, two official plugins are available:
@@ -58,9 +68,9 @@ The port deliberately does not use Vite's default 5173. Browsers scope service w
 
 ## Layout
 
-The interface is deliberately built to fit on a single screen. The shell is exactly one viewport tall (`100dvh`) with `overflow: hidden`, the workspace flexes to fill whatever space is left, and the settings panel compacts itself when the window is short (`max-height` queries). From 1024×768 up to 1920×1080 nothing is cut off and no page scrollbar appears — the footer stays visible above the fold.
+The interface is deliberately built to fit on a single screen. The shell is a viewport-tall flex column, the workspace flexes to fill the space it is given, and the settings column scrolls on its own when the window is short instead of pushing the footer off screen. From 1024×768 up to 1920×1080 nothing is cut off — the footer stays visible above the fold.
 
-Two deliberate degradations keep content reachable on smaller viewports: below 760px wide the shell stops forcing a fixed height so the page scrolls normally, and below 660px tall the panel hides the two rows (`Format` and the quality caption) that only repeat what the Codec, Container, and Compression controls already show.
+The source pane holds the drop zone and the destination row; the settings pane holds rate control, effort, GPU, codec/container, resolution/framerate and audio. Below 800px wide the card stacks into one column; below 620px the built-in file browser moves its shortcuts above the list.
 
 ## Windows desktop build
 
@@ -77,4 +87,4 @@ The installer is created at `dist/Local-Encode-0.0.0-Setup.exe`. The generated `
 
 Encoding depends on the device and browser exposing the requested codec through WebCodecs. Support varies by operating system, hardware, browser version, and installed codec support. The app checks support before conversion and reports which encoder it uses.
 
-When WebCodecs cannot encode the requested codec, the app falls back to a MediaRecorder capture (H.264 MP4 or VP9 WebM) and then to a bundled FFmpeg WebAssembly encoder. The app keeps the strict local-processing model and does not upload files.
+When WebCodecs cannot encode the requested codec, the app falls back to a bundled FFmpeg WebAssembly encoder (downloaded on first use) rather than a real-time MediaRecorder capture — the recorder ran at 1× speed and often produced files that players showed as a single frozen frame. The app keeps the strict local-processing model and does not upload files.

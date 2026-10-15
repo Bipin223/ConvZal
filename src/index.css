@@ -16,7 +16,7 @@ body {
 /* Dark is the designed-for appearance, and the shell starts there. */
 body:has(.app-shell.dark-mode) {
   color-scheme: dark;
-  background: #110e18;
+  background: #0d0a15;
   color: #edeaf4;
 }
 
