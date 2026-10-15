@@ -114,10 +114,17 @@ const CONTAINER_ORDER: ContainerId[] = ['mp4', 'mkv', 'mov', 'webm']
 
 const NATIVE_BUILD = typeof window !== 'undefined' && Boolean(window.desktopAPI)
 
-// Every codec stays selectable everywhere. In the browser a codec without a WebCodecs
-// encoder (usually HEVC / AV1 / VP9) is handled by the bundled software encoder; the UI
-// says which ones are slow, and the result is verified before it is handed over.
+// Every codec stays selectable everywhere. In the browser each one needs an encoder the
+// device actually exposes (WebCodecs), so the panel says which of them this machine can
+// produce, and every result is verified before it is handed over.
 const AVAILABLE_CODECS: CodecId[] = CODEC_ORDER
+
+// What to offer when the chosen codec has no encoder on this machine. Measured in Chromium
+// with its software encoders on a 1080p / 17.5 s clip at "Smallest" (CRF 32): H.264 took
+// 25 s for an 85% smaller file, AV1 took 24 s for 20%, and VP9 had not finished after two
+// minutes. So H.264 is the codec that actually shrinks a file in a browser; the others are
+// only offered when a machine exposes an encoder for them.
+const ALTERNATIVE_ORDER: CodecId[] = ['avc', 'av1', 'vp9']
 
 const CODECS: Record<CodecId, { label: string; name: string; slug: string; containers: ContainerId[] }> = {
   hevc: { label: 'H.265 / HEVC', name: 'HEVC', slug: 'hevc', containers: ['mp4', 'mkv', 'mov'] },
@@ -213,9 +220,39 @@ function containerForCodec(codec: CodecId, container: ContainerId): ContainerId 
   return CODECS[codec].containers.includes(container) ? container : CODECS[codec].containers[0]
 }
 
+// WebCodecs quantizer (CRF) mode is not implemented by every encoder — Edge's software
+// H.264 encoder rejects it outright — so the Quality carries a bitrate next to the
+// quantizer. Mediabunny then offers quantizer-based encoding with a bitrate fallback, CRF
+// still wins where it is supported, and a codec is never wrongly written off as having no
+// encoder at all.
+const CODEC_BITRATE_FACTOR: Record<CodecId, number> = { avc: 1, hevc: 0.6, vp9: 0.6, av1: 0.4 }
+
+// Mirrors Mediabunny's own model for qualitative presets, so the fallback lands in the same
+// ballpark as the CRF that was asked for.
+function estimatedBitrate(codec: CodecId, width: number, height: number, crf: number): number {
+  const quality = Math.min(1, Math.max(0, (41 - crf) / 25))
+  const scale = Math.pow((width * height) / (1920 * 1080), 0.95)
+  const factor = 0.3 * Math.exp(2.5538 * quality)
+  return Math.ceil((3_000_000 * scale * CODEC_BITRATE_FACTOR[codec] * factor) / 1000) * 1000
+}
+
+function crfQuality(codec: CodecId, width: number, height: number, crf: number): Quality {
+  return new Quality({ quantizer: crf, bitrate: estimatedBitrate(codec, width, height, crf), bitrateMode: 'variable' })
+}
+
 function codecForContainer(container: ContainerId, codec: CodecId): CodecId {
   if (CODECS[codec].containers.includes(container)) return codec
   return CODEC_ORDER.find((candidate) => CODECS[candidate].containers.includes(container)) ?? 'avc'
+}
+
+// Names the browser and the exact settings page that turns hardware encoding on, so the
+// "no encoder" message tells the user what to do instead of just what failed.
+function accelerationHint(): { browser: string; settings: string | null } {
+  const ua = typeof navigator === 'undefined' ? '' : navigator.userAgent
+  if (/Edg\//.test(ua)) return { browser: 'Edge', settings: 'edge://settings/system' }
+  if (/OPR\//.test(ua)) return { browser: 'Opera', settings: 'opera://settings/system' }
+  if (/Chrome\//.test(ua)) return { browser: 'Chrome', settings: 'chrome://settings/system' }
+  return { browser: 'this browser', settings: null }
 }
 
 // The native engine reports raw codes; the audio path uses `aac` / `m4a`, which are not
@@ -628,9 +665,6 @@ function App() {
   const ffmpegRef = useRef(new FFmpeg())
   // The in-flight device (WebCodecs) conversion, so Cancel can actually abort it.
   const browserJobRef = useRef<Conversion | null>(null)
-  // Whether the user picked a codec themselves; if not, a codec this device cannot encode
-  // is swapped for one that works rather than failing on Convert.
-  const codecTouchedRef = useRef(false)
   // Distinguishes "the user pressed Cancel" from a genuine encode failure.
   const cancelRequestedRef = useRef(false)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -641,9 +675,10 @@ function App() {
   const [source, setSource] = useState<Source | null>(null)
   const [result, setResult] = useState<ConvertResult | null>(null)
 
-  // H.265 is the point of the app (it shrinks a file the most), so it is the default
-  // everywhere. When the browser has no HEVC hardware encoder the panel says it will fall
-  // back to the bundled software encoder, which is slower but still produces real H.265.
+  // H.265 is the point of the app (it shrinks a file the most), so it stays the default
+  // here and in the desktop build. The browser path cannot silently downgrade the codec:
+  // when this device has no encoder for the chosen one, the panel says exactly why and
+  // offers H.264 or the desktop app instead of quietly producing something else.
   const [codec, setCodec] = useState<CodecId>('hevc')
   const [container, setContainer] = useState<ContainerId>('mp4')
   const [rateMode, setRateMode] = useState<RateMode>('crf')
@@ -667,11 +702,26 @@ function App() {
   const [elapsed, setElapsed] = useState(0)
   const [isDark, setIsDark] = useState(true)
   const [desktopMode, setDesktopMode] = useState(false)
-  // Codecs this browser cannot encode in hardware, so they fall back to the slower
-  // software encoder. Surfaced in the panel so nobody waits for a slow encode by surprise.
-  const [softwareCodecs, setSoftwareCodecs] = useState<CodecId[]>([])
+  // Which codecs this browser can actually encode with the encoders it exposes, probed
+  // once on mount so the panel can explain a missing one before Convert is pressed.
+  const [encodableCodecs, setEncodableCodecs] = useState<Partial<Record<CodecId, boolean>>>({})
+  // Whether the machine exposes any hardware video encoder at all (probed with H.264,
+  // which every Chromium has in software). When there is none, HEVC cannot be encoded in
+  // the browser: Chromium ships no software HEVC encoder and uses hardware only.
+  const [hasHardwareEncoder, setHasHardwareEncoder] = useState<boolean | null>(null)
 
   const crfPreset = CRF_PRESETS.find((preset) => preset.crf === crf && !lossless)?.id
+
+  // True only once the probe has answered for this codec: this browser cannot encode it.
+  const codecUnencodable = !desktopMode && !audioOnly && encodableCodecs[codec] === false
+  // HEVC is the one codec that has no software encoder in Chromium, so "no hardware
+  // encoder anywhere" is the specific, fixable cause worth calling out.
+  const hevcNeedsHardware = codecUnencodable && codec === 'hevc' && hasHardwareEncoder === false
+  const acceleration = hevcNeedsHardware ? accelerationHint() : null
+  // The best codec this machine *can* encode, offered as a one-click swap.
+  const alternative = codecUnencodable
+    ? ALTERNATIVE_ORDER.find((candidate) => candidate !== codec && encodableCodecs[candidate]) ?? null
+    : null
 
   const codecName = CODECS[codec].name
   const containerLabel = CONTAINERS[container].label
@@ -693,7 +743,14 @@ function App() {
     let cancelled = false
     const api = desktop()
     if (!api) return
-    void api.appInfo().then(() => { if (!cancelled) setDesktopMode(true) }).catch(() => {})
+    void api.appInfo().then(() => {
+      if (cancelled) return
+      setDesktopMode(true)
+      // The reference H.265 converters pick the fastest working encoder without asking, so
+      // the GPU starts switched on and the plan chain still falls back to the CPU encoder
+      // the moment ffmpeg reports the GPU encoder unusable.
+      setHardware(true)
+    }).catch(() => {})
     return () => { cancelled = true }
   }, [])
 
@@ -701,20 +758,18 @@ function App() {
     if (NATIVE_BUILD) return
     let cancelled = false
     void (async () => {
-      const results = await Promise.all(CODEC_ORDER.map(async (candidate) => {
-        const supported = await canEncodeVideo(candidate).catch(() => false)
-        return [candidate, supported] as const
-      }))
+      const [results, hardwareEncoder] = await Promise.all([
+        Promise.all(CODEC_ORDER.map(async (candidate) => {
+          const supported = await canEncodeVideo(candidate).catch(() => false)
+          return [candidate, supported] as const
+        })),
+        // `prefer-hardware` is answered by the GPU process: it reports false when the
+        // machine has no hardware encoder to offer, which is the case that rules HEVC out.
+        canEncodeVideo('avc', { hardwareAcceleration: 'prefer-hardware' }).catch(() => false),
+      ])
       if (cancelled) return
-      const missing = results.filter(([, supported]) => !supported).map(([candidate]) => candidate)
-      setSoftwareCodecs(missing)
-      // The default codec is H.265. If this device cannot encode it, and the user has not
-      // chosen a codec yet, move to H.264 (which every Chrome can encode) instead of
-      // letting the first conversion fail.
-      if (!codecTouchedRef.current && missing.includes('hevc') && !missing.includes('avc')) {
-        setCodec('avc')
-        setContainer((current) => containerForCodec('avc', current))
-      }
+      setEncodableCodecs(Object.fromEntries(results) as Partial<Record<CodecId, boolean>>)
+      setHasHardwareEncoder(hardwareEncoder)
     })()
     return () => { cancelled = true }
   }, [])
@@ -848,9 +903,17 @@ function App() {
     if (!file) throw new Error('this file cannot be read in the browser')
     const targetWidth = resolution === 'source' ? undefined : Number(resolution)
     const targetFrameRate = frameRate === 'source' ? undefined : Number(frameRate)
+    // The encoder is configured with the real output size, so the capability probe uses it
+    // too: an encoder can accept one size and refuse another.
+    const sourceWidth = source?.width || 1920
+    const sourceHeight = source?.height || 1080
+    const outputWidth = targetWidth ?? sourceWidth
+    const outputHeight = Math.max(2, Math.round((outputWidth * sourceHeight) / sourceWidth))
     const encodingQuality = rateMode === 'bitrate'
       ? new Quality({ bitrate: Number(videoBitrate) * 1000, bitrateMode: 'variable' })
-      : new Quality({ quantizer: lossless ? 0 : crf })
+      : lossless
+        ? new Quality({ quantizer: 0 })
+        : crfQuality(codec, outputWidth, outputHeight, crf)
 
     // Audio-only always goes through FFmpeg WASM: its AAC encoder is quick and dependable
     // and no video encoding is involved.
@@ -886,12 +949,19 @@ function App() {
     // WebAssembly fallback - the bundled core's x264/x265 is noasm and single-threaded and
     // cannot finish a real clip (see the note above \`buildWasmAudioArgs\`). Trying it is
     // what made the app look frozen at 0% forever.
-    const probeOptions: { width?: number; frameRate?: number; quality?: Quality } = { quality: encodingQuality }
-    if (targetWidth) probeOptions.width = targetWidth
+    const probeOptions: { width?: number; height?: number; frameRate?: number; quality?: Quality } = {
+      quality: encodingQuality,
+      width: outputWidth,
+      height: outputHeight,
+    }
     if (targetFrameRate) probeOptions.frameRate = targetFrameRate
     const supported = await canEncodeVideo(codec, probeOptions).catch(() => false)
     if (!supported) {
-      throw new Error(`this device has no ${CODECS[codec].name} encoder for video — choose H.264, or use the desktop app for ${CODECS[codec].name}`)
+      const hint = accelerationHint()
+      const swap = alternative ? `switch to ${CODECS[alternative].name}` : 'switch codec'
+      throw new Error(codec === 'hevc' && hasHardwareEncoder === false
+        ? `H.265 needs a hardware video encoder and ${hint.browser} has none — turn on hardware acceleration${hint.settings ? ` (${hint.settings})` : ''} and restart, ${swap}, or convert with the desktop app`
+        : `${hint.browser} has no ${CODECS[codec].name} video encoder for these settings — ${swap}, or convert with the desktop app`)
     }
 
     setStatus(`Encoding ${CODECS[codec].name} with the device encoder…`)
@@ -931,7 +1001,7 @@ function App() {
       label: 'The device encoder',
     })
     return finalizeBrowser(produced, videoOutput(codec, container))
-  }, [source, resolution, frameRate, rateMode, videoBitrate, lossless, crf, codec, container, hardware, audioBitrate, audioOnly, finalizeBrowser])
+  }, [source, resolution, frameRate, rateMode, videoBitrate, lossless, crf, codec, container, hardware, audioBitrate, audioOnly, finalizeBrowser, hasHardwareEncoder, alternative])
 
   const convert = useCallback(async () => {
     if (!source || isBusy) return
@@ -1315,7 +1385,7 @@ function App() {
             <label className="field">
               <span className="field-label">Codec</span>
               <span className="field-control">
-                <select value={codec} onChange={(event) => { const next = event.target.value as CodecId; codecTouchedRef.current = true; setCodec(next); setContainer((current) => containerForCodec(next, current)) }}>
+                <select value={codec} onChange={(event) => { const next = event.target.value as CodecId; setCodec(next); setContainer((current) => containerForCodec(next, current)) }}>
                   {AVAILABLE_CODECS.map((option) => <option value={option} key={option}>{CODECS[option].label}</option>)}
                 </select>
               </span>
@@ -1330,26 +1400,40 @@ function App() {
             </label>
           </div>
 
-          {!desktopMode && !audioOnly && softwareCodecs.includes(codec) && (
+          {!desktopMode && codecUnencodable && (
             <p className="panel-note warn-note">
-              This device has no <strong>{CODECS[codec].name}</strong> video encoder, so {CODECS[codec].name} cannot be
-              produced in the browser — the only fallback is a software encoder that is far too slow (it never finished
-              a four-second clip). {' '}
-              <button
-                type="button"
-                className="inline-link"
-                onClick={() => { codecTouchedRef.current = true; setCodec('avc'); setContainer((current) => containerForCodec('avc', current)) }}
-              >
-                Switch to H.264
-              </button>{' '}
-              — it is fast here and still shrinks the file. For real {CODECS[codec].name}, use the <strong>desktop app</strong>.
+              {hevcNeedsHardware && acceleration ? (
+                <>
+                  <strong>HEVC</strong> is encoded in hardware only, and {acceleration.browser} has no hardware video
+                  encoder available right now. That is normally hardware acceleration being switched off, or an
+                  out-of-date GPU driver — turning acceleration back on
+                  {acceleration.settings ? <> in <strong>{acceleration.settings}</strong></> : null} and restarting the
+                  browser brings H.265 back.
+                </>
+              ) : (
+                <>This browser has no <strong>{CODECS[codec].name}</strong> encoder available right now.</>
+              )}{' '}
+              {alternative ? (
+                <>
+                  <button
+                    type="button"
+                    className="inline-link"
+                    onClick={() => { setCodec(alternative); setContainer((current) => containerForCodec(alternative, current)) }}
+                  >
+                    Switch to {CODECS[alternative].name}
+                  </button>
+                  {alternative === 'avc'
+                    ? ' — in a browser this is the codec that actually shrinks files, most of all with “Smallest” selected.'
+                    : ' — it encodes here, on this computer.'}{' '}
+                </>
+              ) : null}
+              For {CODECS[codec].name} on any machine, the <strong>desktop app</strong> uses native FFmpeg.
             </p>
           )}
 
-          {!desktopMode && (audioOnly || !softwareCodecs.includes(codec)) && (
+          {!desktopMode && !codecUnencodable && (
             <p className="panel-note">
-              <strong>{CODECS[codec].name}</strong> is encoded by your device's own encoder, so it stays quick and the
-              file never leaves this computer.
+              <strong>{CODECS[codec].name}</strong> is encoded by this computer, so the file never leaves it.
             </p>
           )}
 
