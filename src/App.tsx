@@ -111,6 +111,15 @@ declare global {
 const CODEC_ORDER: CodecId[] = ['avc', 'hevc', 'av1', 'vp9']
 const CONTAINER_ORDER: ContainerId[] = ['mp4', 'mkv', 'mov', 'webm']
 
+const NATIVE_BUILD = typeof window !== 'undefined' && Boolean(window.desktopAPI)
+
+// Only H.264 has a WebCodecs encoder on essentially every device. HEVC, AV1 and VP9
+// usually fall back to a WebAssembly encoder that is far too slow for a real file
+// (minutes for a phone clip), so the browser build offers H.264 only. The desktop
+// build bundles FFmpeg and keeps the full list.
+const BROWSER_CODECS: CodecId[] = ['avc']
+const AVAILABLE_CODECS: CodecId[] = NATIVE_BUILD ? CODEC_ORDER : BROWSER_CODECS
+
 const CODECS: Record<CodecId, { label: string; name: string; slug: string; containers: ContainerId[] }> = {
   hevc: { label: 'H.265 / HEVC', name: 'HEVC', slug: 'hevc', containers: ['mp4', 'mkv', 'mov'] },
   avc: { label: 'H.264 / AVC', name: 'H.264', slug: 'h264', containers: ['mp4', 'mkv', 'mov'] },
@@ -649,7 +658,7 @@ function App() {
   // H.264 is the only codec that plays on essentially every phone, TV and app, so the
   // in-browser (and therefore mobile) build defaults to it. The desktop build has a
   // full FFmpeg and defaults to the smaller HEVC.
-  const [codec, setCodec] = useState<CodecId>(() => (desktop() ? 'hevc' : 'avc'))
+  const [codec, setCodec] = useState<CodecId>(() => (NATIVE_BUILD ? 'hevc' : 'avc'))
   const [container, setContainer] = useState<ContainerId>('mp4')
   const [rateMode, setRateMode] = useState<RateMode>('crf')
   const [lossless, setLossless] = useState(false)
@@ -1300,7 +1309,7 @@ function App() {
               <span className="field-label">Codec</span>
               <span className="field-control">
                 <select value={codec} onChange={(event) => { const next = event.target.value as CodecId; setCodec(next); setContainer((current) => containerForCodec(next, current)) }}>
-                  {CODEC_ORDER.map((option) => <option value={option} key={option}>{CODECS[option].label}</option>)}
+                  {AVAILABLE_CODECS.map((option) => <option value={option} key={option}>{CODECS[option].label}</option>)}
                 </select>
               </span>
             </label>
@@ -1314,10 +1323,10 @@ function App() {
             </label>
           </div>
 
-          {!desktopMode && codec !== 'avc' && (
+          {!desktopMode && (
             <p className="panel-note">
-              Heads up: <strong>H.264 · MP4</strong> plays on virtually every phone, TV and app. HEVC and AV1 files
-              may not open on some devices or in chat apps.
+              The browser encodes <strong>H.264</strong> with your device's own hardware encoder, so it is fast and the
+              result plays on every phone, TV and app. The <strong>desktop app</strong> adds HEVC, AV1 and VP9.
             </p>
           )}
 

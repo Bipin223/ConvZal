@@ -925,7 +925,16 @@
   .field-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 800px) {
-  .card { grid-template-columns: minmax(0, 1fr); }
+  /* One column: stack the panes and let the page scroll. The desktop rule
+     (`grid-template-rows: minmax(0,1fr)` inside a height-capped card) collapsed the
+     first row to zero here, which hid the whole upload pane on phones. */
+  .card {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+    max-height: none;
+  }
+  .upload-panel,
+  .settings-panel { overflow: visible; }
   .settings-panel { border-left: 0; border-top: 1px solid var(--outline); }
   .field-row { grid-template-columns: minmax(0, 1fr); }
   .field-row .field select { max-width: 200px; }
