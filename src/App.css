@@ -2,13 +2,14 @@
    Rizal_convert — "deep violet" theme, compacted.
 
    Skinned to the dark reference: near-black indigo page, violet accent, a
-   soft corner glow, and inset control groups. Two languages, kept tonal:
+   soft corner glow, and boxed selects. Two languages, kept tonal:
      · Material 3  — tonal surface roles, segmented buttons, state layers
-     · iOS inset   — grouped rows, label-left / value-right
-   Structure is unchanged from the two-pane workspace (drop zone left,
-   controls right); only the skin and the scale changed. The card is capped
-   well under the reference's 736x409 so it clears one screen with room to
-   spare, and the control rhythm is tightened to match.
+     · iOS inset   — label-left / value-right rows
+   Two panes stay: drop zone left, controls right. Everything is scaled well
+   under the reference so the whole converter clears one screen with room to
+   spare, and paired rows (codec/container, resolution/frame rate) sit two-up
+   until the width runs out, then stack label-over-control rather than
+   collapsing the pair.
    Type is the system UI stack (Roboto / SF Pro / Segoe UI).
    =========================================================================== */
 
@@ -126,7 +127,7 @@
 .topbar,
 .intro,
 .card,
-.footer-note { width: 100%; max-width: 720px; position: relative; }
+.footer-note { width: 100%; max-width: 880px; position: relative; }
 
 /* ---------------------------------------------------------------- topbar */
 .topbar {
@@ -158,18 +159,10 @@
   transition: transform .5s var(--ease-move), box-shadow .5s var(--ease-move);
 }
 .brand:hover .brand-mark { transform: rotate(-6deg) scale(1.06); box-shadow: 0 6px 18px rgba(142, 69, 241, .5); }
-.brand-text { display: grid; gap: 1px; }
 .brand-name {
   font-size: 12px;
   font-weight: 700;
   letter-spacing: .13em;
-  line-height: 1.1;
-}
-.brand-sub {
-  color: var(--on-surface-faint);
-  font-size: 8.5px;
-  font-weight: 600;
-  letter-spacing: .17em;
   line-height: 1.1;
 }
 
@@ -231,7 +224,7 @@
 }
 
 /* ----------------------------------------------------------------- intro */
-.intro { display: grid; gap: 3px; animation: enter .55s var(--ease-settle) .03s both; }
+.intro { display: grid; gap: 6px; animation: enter .55s var(--ease-settle) .03s both; }
 .intro h1 {
   margin: 0;
   font-size: 26px;
@@ -246,18 +239,30 @@
   background-clip: text;
   color: transparent;
 }
-.intro p {
+/* The reference opens with a short violet rule ahead of the kicker line. */
+.eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 0;
-  color: var(--on-surface-variant);
-  font-size: 12.5px;
-  line-height: 1.35;
+  color: var(--accent-bright);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: .18em;
+}
+.eyebrow span {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 2px;
+  border-radius: 2px;
+  background: currentColor;
 }
 
 /* ------------------------------------------------------------------ card */
 .card {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1.12fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1.32fr) minmax(0, 1fr);
   gap: 0;
   overflow: hidden;
   border: 1px solid var(--card-border);
@@ -323,9 +328,17 @@
   color: var(--on-accent-container);
   background: var(--accent-container);
   box-shadow: 0 0 0 1px var(--outline) inset;
-  font-size: 17px;
-  font-weight: 600;
   transition: transform .4s var(--ease-move), background .5s var(--ease-move);
+}
+/* Outlined SVG, so the arrow keeps one shape on every platform font. */
+.upload-glyph svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .drop-zone:hover .upload-glyph { transform: translateY(-3px); }
 .drop-zone.has-file .upload-glyph { transform: none; }
@@ -394,17 +407,15 @@
   font-weight: 700;
   letter-spacing: .1em;
 }
-.panel-heading h2 { margin: 0; font-size: 13px; font-weight: 600; letter-spacing: -.01em; }
+.panel-heading h2 { margin: 0; font-size: 14.5px; font-weight: 600; letter-spacing: -.01em; }
 
 .format-summary {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 5px 10px;
-  border: 1px solid var(--outline);
-  border-radius: 12px;
-  background: var(--field-bg);
-  transition: background .5s var(--ease-move), border-color .5s var(--ease-move);
+  padding: 6px 0;
+  border-bottom: 1px solid var(--outline);
+  transition: border-color .5s var(--ease-move);
 }
 .format-value {
   margin-left: auto;
@@ -423,51 +434,53 @@
   background: var(--ok);
 }
 
-/* iOS "inset grouped" list: rows share one container, hairlines between. */
-.group {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  border: 1px solid var(--outline);
-  border-radius: 14px;
-  background: var(--field-bg);
-  transition: background .5s var(--ease-move), border-color .5s var(--ease-move);
-}
+/* Rows sit directly on the panel now, the way the reference lists them. */
 .field {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
   min-height: 27px;
-  padding: 3px 11px;
+  padding: 3px 0;
   transition: background .25s var(--ease-move);
 }
-.field:hover { background: var(--press); }
 .field-label {
   flex: 0 0 auto;
   color: var(--on-surface-variant);
   font-size: 12px;
 }
-.divider { height: 1px; margin-left: 11px; background: var(--outline); transition: background .5s var(--ease-move); }
-
 .field-control { display: flex; align-items: center; gap: 8px; min-width: 0; }
+
+/* Codec/Container and Resolution/Frame rate sit two-up, as in the reference. */
+.field-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 12px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--outline);
+}
+.field-row .field select { width: 100%; max-width: none; }
+/* A row that is a direct child of the panel is its own section, so it carries
+   the same hairline the other sections end on. Target bitrate and Audio
+   bitrate land here; the paired halves live inside .field-row instead. */
+.settings-panel > .field { padding: 5px 0; border-bottom: 1px solid var(--outline); }
 
 /* The select keeps its native popup for accessibility and platform feel,
    but sheds the OS chrome so only the value and a custom chevron remain. */
 .field select {
-  max-width: 158px;
-  padding: 4px 22px 4px 8px;
-  border: 0;
+  max-width: 172px;
+  padding: 5px 22px 5px 8px;
+  border: 1px solid var(--outline);
   border-radius: 9px;
   color: var(--on-surface);
-  background-color: transparent;
+  background-color: var(--field-bg);
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2.6 4.4 6 7.8l3.4-3.4' fill='none' stroke='%23a49db8' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
-  background-position: right 6px center;
+  background-position: right 8px center;
   font: inherit;
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 600;
-  text-align: right;
+  text-align: left;
   text-overflow: ellipsis;
   appearance: none;
   cursor: pointer;
@@ -488,12 +501,12 @@
   justify-content: flex-start;
   flex-direction: column;
   gap: 4px;
-  padding: 5px 11px 6px;
+  padding: 5px 0 8px;
+  border-bottom: 1px solid var(--outline);
 }
-.text-segmented:hover { background: transparent; }
 .segment-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
 .field-hint {
-  color: var(--on-surface-faint);
+  color: var(--accent-bright);
   font-size: 10.5px;
   font-weight: 600;
   letter-spacing: .01em;
@@ -506,6 +519,7 @@
   grid-auto-flow: column;
   grid-auto-columns: 1fr;
   padding: 2px;
+  border: 1px solid var(--outline-strong);
   border-radius: 11px;
   background: var(--seg-track);
   transition: background .5s var(--ease-move);
@@ -532,13 +546,33 @@
   text-transform: uppercase;
   line-height: 1.15;
 }
+/* The rate-control track labels its slots in sentence case, unlike the
+   shouty uppercase compression track. */
+.segmented.sentence .segment-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
 .segment-caption {
-  font-size: 8.5px;
+  font-size: 9.5px;
   font-weight: 500;
   letter-spacing: 0;
   text-transform: none;
   line-height: 1.15;
   opacity: .75;
+}
+/* Compression's descriptors sit under the track's outer edges instead of
+   inside the slots, so the track itself stays one clean line of labels. */
+.segment-captions {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 7px;
+  color: var(--on-surface-faint);
+  font-size: 9.5px;
+  font-weight: 500;
+  line-height: 1.2;
 }
 .segment:hover { color: var(--on-surface); }
 .segment:active { transform: scale(.97); }
@@ -566,7 +600,13 @@
 .segment.active .segment-caption { opacity: .9; }
 
 /* ------------------------------------------------------------ action zone */
-.action-zone { display: flex; flex-direction: column; gap: 7px; margin-top: auto; }
+.action-zone {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: auto;
+  padding-top: 9px;
+}
 
 .convert-button {
   display: flex;
@@ -668,6 +708,14 @@
 /* Two panes stay side by side down to quite narrow widths — the compact
    control rhythm is what buys the room, and it is also what lets the whole
    converter clear one screen. Only a genuinely phone-width window stacks. */
+/* Once the panes are this narrow the paired halves can no longer hold a label
+   and its value on one line without clipping the value, so each pair becomes
+   its own full-width row again and the control keeps the room it needs. */
+@media (max-width: 800px) {
+  .field-row { grid-template-columns: minmax(0, 1fr); }
+  .field-row .field select { max-width: 172px; }
+}
+
 @media (max-width: 520px) {
   .card { grid-template-columns: minmax(0, 1fr); }
   .settings-panel { padding: 11px; border-left: 0; border-top: 1px solid var(--outline); }

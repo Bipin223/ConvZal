@@ -79,6 +79,10 @@ const RECORDER_MIME_TYPES: Record<ContainerId, string[]> = {
 
 const CRF_BY_PRESET: Record<QualityPreset, number> = { smallest: 30, balanced: 23, quality: 18 }
 
+// MediaRecorder has no CRF knob, so the preset is translated into a bits-per-pixel target.
+// Without this the recorder wrote one flat bitrate and the Compression choice did nothing.
+const RECORDER_BITS_PER_PIXEL: Record<QualityPreset, number> = { smallest: 0.045, balanced: 0.09, quality: 0.15 }
+
 const QUALITY_ORDER: QualityPreset[] = ['smallest', 'balanced', 'quality']
 const RATE_ORDER: RateControl[] = ['crf', 'bitrate']
 
@@ -193,6 +197,8 @@ function recordBrowserCompatibleVideo(
   requestedFrameRate: number | undefined,
   videoBitrate: number,
   audioBitrate: number,
+  quality: QualityPreset,
+  rateControl: RateControl,
   onProgress: (value: number) => void,
 ): Promise<BrowserRecordingResult> {
   const video = document.createElement('video')
@@ -268,9 +274,13 @@ function recordBrowserCompatibleVideo(
         captureStream.getTracks().forEach((track) => track.stop())
       }
 
+      const recorderBitrate = rateControl === 'bitrate'
+        ? videoBitrate * 1000
+        : Math.round(width * height * frameRate * RECORDER_BITS_PER_PIXEL[quality])
+
       recorder = new MediaRecorder(combinedStream, {
         mimeType,
-        videoBitsPerSecond: videoBitrate * 1000,
+        videoBitsPerSecond: recorderBitrate,
         audioBitsPerSecond: audioBitrate * 1000,
       })
       recorder.ondataavailable = (event) => { if (event.data.size > 0) chunks.push(event.data) }
@@ -318,23 +328,27 @@ function recordBrowserCompatibleVideo(
   })
 }
 
-function TextSegmented<T extends string>({ label, hint, options, value, onChange, sliding = false }: {
+function TextSegmented<T extends string>({ label, hint, options, value, onChange, sliding = false, captionsBelow = false, sentence = false }: {
   label: string
   hint?: string
   options: { id: T; label: string; title?: string; caption?: string }[]
   value: T
   onChange: (next: T) => void
   sliding?: boolean
+  captionsBelow?: boolean
+  sentence?: boolean
 }) {
   const activeIndex = Math.max(0, options.findIndex((option) => option.id === value))
-  const hasCaptions = options.some((option) => option.caption)
+  // Captions live inside the slot when they describe the option in place, and
+  // under the track when the reference puts them at its outer edges instead.
+  const hasCaptions = !captionsBelow && options.some((option) => option.caption)
   return (
     <div className={`field text-segmented ${sliding ? 'sliding' : ''}`}>
       <div className="segment-heading">
         <span className="field-label">{label}</span>
         {hint && <span className="field-hint">{hint}</span>}
       </div>
-      <div className="segmented" role="group" aria-label={label}>
+      <div className={`segmented ${sentence ? 'sentence' : ''}`} role="group" aria-label={label}>
         {options.map((option) => (
           <button
             type="button"
@@ -359,6 +373,11 @@ function TextSegmented<T extends string>({ label, hint, options, value, onChange
           />
         )}
       </div>
+      {captionsBelow && options.some((option) => option.caption) && (
+        <div className="segment-captions">
+          {options.filter((option) => option.caption).map((option) => <span key={option.id}>{option.caption}</span>)}
+        </div>
+      )}
     </div>
   )
 }
@@ -459,42 +478,57 @@ function App() {
         resultCodec = nativeResult.codec as CodecId
         resultContainer = nativeResult.container as ContainerId
         resultBlob = new Blob([data.buffer as ArrayBuffer], { type: CONTAINERS[resultContainer].mimeType })
-      } else if (await canEncodeVideo(codec, { quality: encodingQuality, width: targetWidth, frameRate: targetFrameRate })) {
-        const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
-        const output = new Output({ format: createOutputFormat(container), target: new BufferTarget() })
-        const conversion = await Conversion.init({
-          input,
-          output,
-          tracks: 'all',
-          video: {
-            codec,
-            quality: encodingQuality,
-            forceTranscode: true,
-            width: targetWidth,
-            frameRate: targetFrameRate,
-            // Short, evenly spaced keyframes keep HEVC/AV1 results seekable in every player.
-            keyFrameInterval: 2,
-          },
-          showWarnings: false,
-        })
-        if (!conversion.isValid) throw new Error('This video does not have a browser-decodable track')
-        conversion.onProgress = (nextProgress) => {
-          setProgress(Math.max(0, Math.min(100, Math.round(nextProgress * 100))))
-          setStatus(`Encoding ${CODECS[codec].name} with the device encoder...`)
-        }
-        await conversion.execute()
-        if (!output.target.buffer) throw new Error('The encoder returned an empty file')
-        resultBlob = new Blob([output.target.buffer], { type: CONTAINERS[container].mimeType })
       } else {
-        try {
-          setStatus('Using the fast browser compatibility recorder...')
-          const browserResult = await recordBrowserCompatibleVideo(file, container, targetWidth, targetFrameRate, videoBitrateKbps, audioBitrateKbps, setProgress)
-          const isMp4 = browserResult.mimeType.startsWith('video/mp4')
-          resultCodec = isMp4 ? 'avc' : 'vp9'
-          resultContainer = isMp4 ? 'mp4' : 'webm'
-          resultBlob = browserResult.blob
-        } catch (browserError) {
-          console.warn('Browser compatibility recorder unavailable', browserError)
+        // A strict capability probe is not a reliable verdict: it reports HEVC/AV1 as
+        // unsupported on hardware that encodes them fine, and the old code then fell through
+        // to the real-time recorder - which is slow and ignores the compression preset.
+        // Attempt the device encoder whenever the probe does not clearly rule it out, and let
+        // an actual failure decide. Undefined is treated as "unknown", not "unsupported".
+        const probe = await canEncodeVideo(codec, { width: targetWidth, frameRate: targetFrameRate })
+          .catch(() => true as const)
+        if (probe !== false) {
+          try {
+            const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
+            const output = new Output({ format: createOutputFormat(container), target: new BufferTarget() })
+            const conversion = await Conversion.init({
+              input,
+              output,
+              tracks: 'all',
+              video: {
+                codec,
+                quality: encodingQuality,
+                forceTranscode: true,
+                width: targetWidth,
+                frameRate: targetFrameRate,
+                // Short, evenly spaced keyframes keep HEVC/AV1 results seekable in every player.
+                keyFrameInterval: 2,
+              },
+              showWarnings: false,
+            })
+            if (!conversion.isValid) throw new Error('This video does not have a browser-decodable track')
+            conversion.onProgress = (nextProgress) => {
+              setProgress(Math.max(0, Math.min(100, Math.round(nextProgress * 100))))
+              setStatus(`Encoding ${CODECS[codec].name} with the device encoder...`)
+            }
+            await conversion.execute()
+            if (!output.target.buffer) throw new Error('The encoder returned an empty file')
+            resultBlob = new Blob([output.target.buffer], { type: CONTAINERS[container].mimeType })
+          } catch (deviceError) {
+            console.warn('Device encoder failed, falling back to the compatibility recorder', deviceError)
+          }
+        }
+
+        if (!resultBlob) {
+          try {
+            setStatus('Using the browser compatibility recorder...')
+            const browserResult = await recordBrowserCompatibleVideo(file, container, targetWidth, targetFrameRate, videoBitrateKbps, audioBitrateKbps, quality, rateControl, setProgress)
+            const isMp4 = browserResult.mimeType.startsWith('video/mp4')
+            resultCodec = isMp4 ? 'avc' : 'vp9'
+            resultContainer = isMp4 ? 'mp4' : 'webm'
+            resultBlob = browserResult.blob
+          } catch (browserError) {
+            console.warn('Browser compatibility recorder unavailable', browserError)
+          }
         }
       }
 
@@ -570,7 +604,7 @@ function App() {
       console.error(error)
       try {
         setStatus('Using the browser compatibility recorder...')
-        const browserResult = await recordBrowserCompatibleVideo(file, container, targetWidth, targetFrameRate, videoBitrateKbps, audioBitrateKbps, setProgress)
+        const browserResult = await recordBrowserCompatibleVideo(file, container, targetWidth, targetFrameRate, videoBitrateKbps, audioBitrateKbps, quality, rateControl, setProgress)
         const isMp4 = browserResult.mimeType.startsWith('video/mp4')
         finishConversion(browserResult.blob, isMp4 ? 'avc' : 'vp9', isMp4 ? 'mp4' : 'webm', sourceName)
       } catch (fallbackError) {
@@ -589,10 +623,7 @@ function App() {
       <header className="topbar">
         <a className="brand" href="/" aria-label="Rizal_convert home">
           <span className="brand-mark">R</span>
-          <span className="brand-text">
-            <span className="brand-name">RIZAL_CONVERT</span>
-            <span className="brand-sub">LOCAL VIDEO OPTIMIZER</span>
-          </span>
+          <span className="brand-name">RIZAL_CONVERT</span>
         </a>
         <div className="topbar-actions">
           <span className="privacy-pill" title="Everything runs on this device"><span className="status-dot" /> DEVICE-ONLY PROCESSING</span>
@@ -619,8 +650,8 @@ function App() {
       </header>
 
       <section className="intro">
+        <p className="eyebrow"><span aria-hidden="true" />LOCAL VIDEO OPTIMIZER</p>
         <h1>Make your video <em>lighter</em>.</h1>
-        <p>Shrink it locally, keep the quality. Nothing leaves this device.</p>
       </section>
 
       <section className="card" aria-label="Video converter">
@@ -631,7 +662,11 @@ function App() {
             onDrop={(event) => { event.preventDefault(); chooseFile(event.dataTransfer.files[0]) }}
           >
             <input type="file" accept="video/*" onChange={(event) => chooseFile(event.target.files?.[0])} />
-            <span className="upload-glyph" aria-hidden="true">↑</span>
+            <span className="upload-glyph" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false">
+                <path d="M12 19V6M6 11.6 12 5.6l6 6" />
+              </svg>
+            </span>
             <strong className="drop-title">{file ? file.name : 'Drop a video here'}</strong>
             <small>{file ? `${(file.size / (1024 * 1024)).toFixed(1)} MB ready to encode` : 'or click to browse your device'}</small>
             {!file && <small className="drop-formats">MP4, MOV, MKV, AVI and more</small>}
@@ -653,37 +688,21 @@ function App() {
             <span className="format-dot" />
           </div>
 
-        <div className="group">
-          <TextSegmented
-            label="Compression"
-            hint={rateControl === 'crf' ? `CRF ${crf}` : 'Set bitrate'}
-            options={QUALITY_ORDER.map((option) => ({
-              id: option,
-              label: option,
-              title: `CRF ${CRF_BY_PRESET[option]}`,
-              caption: option === 'smallest' ? 'Smallest file' : option === 'quality' ? 'Best quality' : '',
-            }))}
-            value={quality}
-            onChange={setQuality}
-            sliding
-          />
-          <div className="divider" />
-          <TextSegmented
-            label="Rate control"
-            hint={rateControl === 'crf' ? 'Quality first' : 'Size first'}
-            options={RATE_ORDER.map((option) => ({
-              id: option,
-              label: option === 'crf' ? 'CRF' : 'Bitrate',
-              title: option === 'crf' ? 'Constant quality' : 'Target bitrate',
-              caption: option === 'crf' ? 'CRF quality' : 'Target bitrate',
-            }))}
-            value={rateControl}
-            onChange={setRateControl}
-            sliding
-          />
-        </div>
+        <TextSegmented
+          label="Compression"
+          options={QUALITY_ORDER.map((option) => ({
+            id: option,
+            label: option,
+            title: `CRF ${CRF_BY_PRESET[option]}`,
+            caption: option === 'smallest' ? 'Smallest file' : option === 'quality' ? 'Best quality' : '',
+          }))}
+          value={quality}
+          onChange={setQuality}
+          sliding
+          captionsBelow
+        />
 
-        <div className="group">
+        <div className="field-row">
           <label className="field">
             <span className="field-label">Codec</span>
             <span className="field-control">
@@ -692,7 +711,6 @@ function App() {
               </select>
             </span>
           </label>
-          <div className="divider" />
           <label className="field">
             <span className="field-label">Container</span>
             <span className="field-control">
@@ -701,27 +719,39 @@ function App() {
               </select>
             </span>
           </label>
-          {rateControl === 'bitrate' && (
-            <>
-              <div className="divider" />
-              <label className="field">
-                <span className="field-label">Target bitrate</span>
-                <span className="field-control">
-                  <select value={videoBitrate} onChange={(event) => setVideoBitrate(event.target.value)}>
-                    <option value="5000">5 Mbps</option>
-                    <option value="8000">8 Mbps</option>
-                    <option value="12000">12 Mbps</option>
-                    <option value="20000">20 Mbps</option>
-                    <option value="30000">30 Mbps</option>
-                    <option value="50000">50 Mbps</option>
-                  </select>
-                </span>
-              </label>
-            </>
-          )}
         </div>
 
-        <div className="group">
+        <TextSegmented
+          label="Rate control"
+          hint={rateControl === 'crf' ? `CRF ${crf}` : `${videoBitrateKbps / 1000} Mbps`}
+          options={RATE_ORDER.map((option) => ({
+            id: option,
+            label: option === 'crf' ? 'CRF quality' : 'Target bitrate',
+            title: option === 'crf' ? 'Constant quality' : 'Target bitrate',
+          }))}
+          value={rateControl}
+          onChange={setRateControl}
+          sliding
+          sentence
+        />
+
+        {rateControl === 'bitrate' && (
+          <label className="field">
+            <span className="field-label">Target bitrate</span>
+            <span className="field-control">
+              <select value={videoBitrate} onChange={(event) => setVideoBitrate(event.target.value)}>
+                <option value="5000">5 Mbps</option>
+                <option value="8000">8 Mbps</option>
+                <option value="12000">12 Mbps</option>
+                <option value="20000">20 Mbps</option>
+                <option value="30000">30 Mbps</option>
+                <option value="50000">50 Mbps</option>
+              </select>
+            </span>
+          </label>
+        )}
+
+        <div className="field-row">
           <label className="field">
             <span className="field-label">Resolution</span>
             <span className="field-control">
@@ -734,7 +764,6 @@ function App() {
               </select>
             </span>
           </label>
-          <div className="divider" />
           <label className="field">
             <span className="field-label">Frame rate</span>
             <span className="field-control">
@@ -748,25 +777,25 @@ function App() {
               </select>
             </span>
           </label>
-          <div className="divider" />
-          <label className="field">
-            <span className="field-label">Audio bitrate</span>
-            <span className="field-control">
-              <select value={audioBitrate} onChange={(event) => setAudioBitrate(event.target.value)}>
-                <option value="96">96 kbps</option>
-                <option value="128">128 kbps</option>
-                <option value="192">192 kbps</option>
-                <option value="256">256 kbps</option>
-                <option value="320">320 kbps</option>
-              </select>
-            </span>
-          </label>
         </div>
+
+        <label className="field">
+          <span className="field-label">Audio bitrate</span>
+          <span className="field-control">
+            <select value={audioBitrate} onChange={(event) => setAudioBitrate(event.target.value)}>
+              <option value="96">96 kbps</option>
+              <option value="128">128 kbps</option>
+              <option value="192">192 kbps</option>
+              <option value="256">256 kbps</option>
+              <option value="320">320 kbps</option>
+            </select>
+          </span>
+        </label>
 
         <div className="action-zone">
           <button className="convert-button" type="button" disabled={!file || isBusy} onClick={convertVideo}>
             <span className="convert-label">{isBusy ? 'Encoding' : `Convert to ${CODECS[codec].name}`}</span>
-            <span className="button-arrow" aria-hidden="true">{isBusy ? `${progress}%` : '→'}</span>
+            <span className="button-arrow" aria-hidden="true">{isBusy ? `${progress}%` : '↗'}</span>
           </button>
           {isBusy && (
             <div className="progress-track" role="progressbar" aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100} aria-label="Conversion progress">
