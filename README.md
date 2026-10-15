@@ -15,9 +15,13 @@ Two long-standing freeze causes are handled explicitly: the decoder `-progress` 
 
 ## Phones and playback
 
-In the browser every codec (H.265/HEVC, H.264/AVC, AV1, VP9) stays selectable. When the device has a WebCodecs encoder for the chosen codec it is used — that is the fast path — and when it does not, ConvZal falls back to its bundled software FFmpeg. The panel says which codecs will use the software encoder, because a software H.265 encode of a phone clip takes minutes rather than seconds. The **desktop app** always uses native FFmpeg, so it is the fastest option for H.265 and AV1.
+In the browser, video is encoded with the device's own WebCodecs encoder. There is deliberately **no WebAssembly video fallback**: the bundled FFmpeg core ships x264/x265 built as `[32 bit][noasm]` that reports *"using cpu capabilities: none!"* and runs a single thread. Measured on a 4-second 1080p clip it did not encode a single frame in 106 seconds, so the app used to sit at 0% forever. It is not a slow path, it is a dead path, and it has been removed.
 
-Whatever the path, the result is **checked before it is shown**: ConvZal reads the produced file back (container, video codec, audio track, duration) and refuses to present it if it is empty, truncated, or in a different codec than the one requested. Sizes are shown as a change against the original ("31% smaller", "about the same size") so a conversion can never be mistaken for "nothing happened".
+That means a codec the device cannot encode in hardware (usually H.265, AV1 and VP9 on Windows) cannot be produced in the browser at all. ConvZal says so instead of hanging: if the default H.265 has no hardware encoder it moves to H.264 automatically, the panel explains exactly why, and offers a one-click **Switch to H.264**. Choosing H.265 anyway is refused immediately with the same explanation. The **desktop app** bundles native FFmpeg and does H.265 and AV1 at full speed, so that is where to go for them.
+
+Audio-only extraction always uses the FFmpeg core, because AAC encoding there is quick and dependable.
+
+Whatever the path, the result is **checked before it is shown**: ConvZal reads the produced file back (container, video codec, audio track, duration) and refuses to present it if it is empty, truncated, or in a different codec than the one requested. Sizes are shown as a change against the original ("31% smaller", "about the same size") so a conversion can never be mistaken for "nothing happened". Cancel is available on every path, in the browser as well as the desktop app.
 
 When the device exposes the Web Share API, the result card also offers **Save to device** so the file can be saved straight into Photos / Files instead of relying on a blob download.
 

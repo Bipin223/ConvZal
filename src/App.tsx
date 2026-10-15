@@ -153,21 +153,6 @@ const SPEEDS: { id: SpeedId; label: string; caption: string }[] = [
   { id: 'quality', label: 'Thorough', caption: 'Smallest' },
 ]
 
-const WASM_PRESETS: Record<string, Record<SpeedId, string>> = {
-  libx265: { fast: 'faster', balanced: 'medium', quality: 'slow' },
-  libx264: { fast: 'veryfast', balanced: 'medium', quality: 'slow' },
-  libsvtav1: { fast: '10', balanced: '8', quality: '6' },
-  'libaom-av1': { fast: '4', balanced: '2', quality: '0' },
-  'libvpx-vp9': { fast: '4', balanced: '2', quality: '1' },
-}
-
-const SOFTWARE_ENCODERS: Record<CodecId, string[]> = {
-  hevc: ['libx265'],
-  avc: ['libx264'],
-  av1: ['libsvtav1', 'libaom-av1'],
-  vp9: ['libvpx-vp9'],
-}
-
 const VIDEO_ACCEPT = 'video/*,.mp4,.m4v,.mkv,.mov,.webm,.avi,.wmv,.flv,.ts,.m2ts,.mts,.mpg,.mpeg,.3gp,.ogv'
 const AUDIO_ACCEPT = 'audio/*,.mp3,.m4a,.aac,.flac,.wav,.ogg,.opus,.wma,.aiff'
 // Video and audio are both accepted so the audio-only mode can be fed a music file too.
@@ -340,81 +325,15 @@ async function runFfmpeg(ffmpeg: FFmpeg, args: string[], outputName: string): Pr
   return typeof data === 'string' ? new TextEncoder().encode(data) : data
 }
 
-/* ------------------------------------------------------ encoder arg (wasm) */
-
-type WasmArgs = {
-  codec: CodecId
-  container: ContainerId
-  encoder: string
-  includeSubtitles: boolean
-  rateMode: RateMode
-  lossless: boolean
-  crf: number
-  videoBitrate: number
-  audioBitrate: number
-  resolution: string
-  frameRate: string
-  speed: SpeedId
-  inputName: string
-  outputName: string
-}
-
-function buildWasmArgs(o: WasmArgs): string[] {
-  const isIsobmff = o.container === 'mp4' || o.container === 'mov'
-  const preset = WASM_PRESETS[o.encoder]?.[o.speed]
-  const args = ['-y', '-fflags', '+genpts', '-i', o.inputName, '-map', '0:V:0', '-map', '0:a?']
-  if (o.includeSubtitles) args.push('-map', '0:s?')
-  args.push('-c:v', o.encoder)
-
-  switch (o.encoder) {
-    case 'libx265':
-      if (preset) args.push('-preset', preset)
-      if (o.lossless) args.push('-x265-params', 'lossless=1')
-      else if (o.rateMode === 'bitrate') args.push('-b:v', `${o.videoBitrate}k`)
-      else args.push('-crf', String(o.crf))
-      break
-    case 'libx264':
-      if (preset) args.push('-preset', preset)
-      if (o.lossless) args.push('-qp', '0')
-      else if (o.rateMode === 'bitrate') args.push('-b:v', `${o.videoBitrate}k`)
-      else args.push('-crf', String(o.crf))
-      break
-    case 'libsvtav1':
-      if (preset) args.push('-preset', preset)
-      if (o.lossless) args.push('-crf', '0')
-      else if (o.rateMode === 'bitrate') args.push('-b:v', `${o.videoBitrate}k`)
-      else args.push('-crf', String(o.crf))
-      break
-    case 'libaom-av1':
-      args.push('-cpu-used', preset || '6', '-row-mt', '1')
-      if (o.lossless) args.push('-lossless', '1')
-      else if (o.rateMode === 'bitrate') args.push('-b:v', `${o.videoBitrate}k`)
-      else args.push('-crf', String(o.crf), '-b:v', '0')
-      break
-    case 'libvpx-vp9':
-      args.push('-deadline', o.speed === 'fast' ? 'realtime' : 'good', '-cpu-used', preset || '2', '-row-mt', '1')
-      if (o.lossless) args.push('-lossless', '1')
-      else if (o.rateMode === 'bitrate') args.push('-b:v', `${o.videoBitrate}k`)
-      else args.push('-crf', String(o.crf), '-b:v', '0')
-      break
-    default:
-      break
-  }
-
-  args.push('-pix_fmt', 'yuv420p')
-  if (o.codec === 'hevc' && isIsobmff) args.push('-tag:v', 'hvc1')
-  args.push('-c:a', o.container === 'webm' ? 'libopus' : 'aac', '-b:a', `${o.audioBitrate}k`)
-  if (o.includeSubtitles) args.push('-c:s', 'copy')
-  const filters: string[] = []
-  if (o.resolution !== 'source') filters.push(`scale=${o.resolution}:-2`)
-  filters.push('scale=trunc(iw/2)*2:trunc(ih/2)*2')
-  args.push('-vf', filters.join(','))
-  if (o.frameRate !== 'source') args.push('-r', String(o.frameRate), '-fps_mode', 'cfr')
-  args.push('-max_muxing_queue_size', '1024')
-  if (isIsobmff) args.push('-movflags', '+faststart')
-  args.push(o.outputName)
-  return args
-}
+// NOTE: there is deliberately no WebAssembly *video* encoder path.
+//
+// The FFmpeg core used here ships libx265/libx264 built as `[32 bit][noasm]`, reports
+// "using cpu capabilities: none!", and runs a single thread. Measured on a 4-second
+// 1080p clip it did not encode a single frame in 106 seconds - minutes of waiting for a
+// phone clip, and effectively never for a long one. Video encoding therefore always goes
+// through the device WebCodecs encoder, and the panel steers to H.264 when the chosen
+// codec has no hardware encoder on this device. The WASM core is still used for
+// audio-only extraction, where AAC encoding is quick.
 
 // Audio-only WASM path: AAC in `.m4a`, mirroring the native `buildAudioArgs`.
 function buildWasmAudioArgs(o: { inputName: string; outputName: string; audioBitrate: number }): string[] {
@@ -425,23 +344,6 @@ function buildWasmAudioArgs(o: { inputName: string; outputName: string; audioBit
     '-movflags', '+faststart',
     o.outputName,
   ]
-}
-
-function buildWasmPlans(codec: CodecId, container: ContainerId): { codec: CodecId; container: ContainerId; encoder: string; includeSubtitles: boolean }[] {
-  const plans: { codec: CodecId; container: ContainerId; encoder: string; includeSubtitles: boolean }[] = []
-  const seen = new Set<string>()
-  const add = (nextCodec: CodecId, nextContainer: ContainerId, includeSubtitles: boolean) => {
-    for (const encoder of SOFTWARE_ENCODERS[nextCodec]) {
-      const key = `${encoder}|${nextContainer}|${includeSubtitles}`
-      if (seen.has(key)) continue
-      seen.add(key)
-      plans.push({ codec: nextCodec, container: nextContainer, encoder, includeSubtitles })
-    }
-  }
-  add(codec, container, container !== 'webm')
-  add(codec, container, false)
-  if (codec !== 'avc' || container !== 'mp4') add('avc', 'mp4', false)
-  return plans
 }
 
 function createOutputFormat(container: ContainerId): OutputFormat {
@@ -724,6 +626,13 @@ function FileBrowser({ mode, initialPath, onClose, onChooseFile, onChooseFolder 
 
 function App() {
   const ffmpegRef = useRef(new FFmpeg())
+  // The in-flight device (WebCodecs) conversion, so Cancel can actually abort it.
+  const browserJobRef = useRef<Conversion | null>(null)
+  // Whether the user picked a codec themselves; if not, a codec this device cannot encode
+  // is swapped for one that works rather than failing on Convert.
+  const codecTouchedRef = useRef(false)
+  // Distinguishes "the user pressed Cancel" from a genuine encode failure.
+  const cancelRequestedRef = useRef(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const outputHandleRef = useRef<DirectoryHandleLike | null>(null)
   const requestIdRef = useRef('')
@@ -796,7 +705,16 @@ function App() {
         const supported = await canEncodeVideo(candidate).catch(() => false)
         return [candidate, supported] as const
       }))
-      if (!cancelled) setSoftwareCodecs(results.filter(([, supported]) => !supported).map(([candidate]) => candidate))
+      if (cancelled) return
+      const missing = results.filter(([, supported]) => !supported).map(([candidate]) => candidate)
+      setSoftwareCodecs(missing)
+      // The default codec is H.265. If this device cannot encode it, and the user has not
+      // chosen a codec yet, move to H.264 (which every Chrome can encode) instead of
+      // letting the first conversion fail.
+      if (!codecTouchedRef.current && missing.includes('hevc') && !missing.includes('avc')) {
+        setCodec('avc')
+        setContainer((current) => containerForCodec('avc', current))
+      }
     })()
     return () => { cancelled = true }
   }, [])
@@ -927,127 +845,98 @@ function App() {
 
   const runBrowserConversion = useCallback(async (): Promise<ConvertResult> => {
     const file = source?.file
-    if (!file) throw new Error('This file cannot be read in the browser')
+    if (!file) throw new Error('this file cannot be read in the browser')
     const targetWidth = resolution === 'source' ? undefined : Number(resolution)
     const targetFrameRate = frameRate === 'source' ? undefined : Number(frameRate)
     const encodingQuality = rateMode === 'bitrate'
       ? new Quality({ bitrate: Number(videoBitrate) * 1000, bitrateMode: 'variable' })
       : new Quality({ quantizer: lossless ? 0 : crf })
 
-    // Device / WebCodecs encoder first: it produces a properly muxed file and is fast.
-    // Audio-only always goes through FFmpeg WASM, whose AAC encoder is dependable.
-    const probe = audioOnly ? false : await canEncodeVideo(codec, { width: targetWidth, frameRate: targetFrameRate }).catch(() => true as const)
-    if (probe !== false) {
-      try {
-        setStatus(`Encoding ${CODECS[codec].name} with the device encoder…`)
-        const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
-        const output = new Output({ format: createOutputFormat(container), target: new BufferTarget() })
-        const conversion = await Conversion.init({
-          input,
-          output,
-          tracks: 'all',
-          video: {
-            codec,
-            quality: encodingQuality,
-            forceTranscode: true,
-            width: targetWidth,
-            frameRate: targetFrameRate,
-            keyFrameInterval: 2,
-            hardwareAcceleration: hardware ? 'prefer-hardware' : 'no-preference',
-          },
-          showWarnings: false,
-        })
-        if (!conversion.isValid) throw new Error('No browser-decodable track in this file')
-        conversion.onProgress = (value) => {
-          setProgress(Math.max(0, Math.min(100, Math.round(value * 100))))
-        }
-        await conversion.execute()
-        if (!output.target.buffer) throw new Error('The encoder returned an empty file')
-        const produced = new Blob([output.target.buffer], { type: CONTAINERS[container].mimeType })
-        assertConverted(await inspectMedia(produced), {
-          codec,
-          audioOnly: false,
-          duration: source?.duration ?? 0,
-          label: 'The device encoder',
-        })
-        return finalizeBrowser(produced, videoOutput(codec, container))
-      } catch (deviceError) {
-        console.warn('Device encoder unavailable, falling back to FFmpeg WASM', deviceError)
+    // Audio-only always goes through FFmpeg WASM: its AAC encoder is quick and dependable
+    // and no video encoding is involved.
+    if (audioOnly) {
+      setStatus('Downloading the local FFmpeg engine…')
+      const ffmpeg = ffmpegRef.current
+      if (!ffmpeg.loaded) {
+        const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm'
+        const coreURL = await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript')
+        const wasmURL = await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm')
+        await ffmpeg.load({ coreURL, wasmURL })
       }
-    }
-
-    setStatus('Downloading the local FFmpeg engine…')
-    const ffmpeg = ffmpegRef.current
-    if (!ffmpeg.loaded) {
-      const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm'
-      const coreURL = await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript')
-      const wasmURL = await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm')
-      await ffmpeg.load({ coreURL, wasmURL })
-    }
-
-    const inputExtension = file.name.split('.').pop()?.toLowerCase() || 'mp4'
-    const inputName = `input.${inputExtension}`
-    await ffmpeg.writeFile(inputName, await fetchFile(file))
-
-    const onProgress = (event: { progress: number }) => {
-      setProgress(Math.max(0, Math.min(100, Math.round(event.progress * 100))))
-    }
-    ffmpeg.on('progress', onProgress)
-
-    try {
-      if (audioOnly) {
+      const inputExtension = file.name.split('.').pop()?.toLowerCase() || 'mp4'
+      const inputName = `input.${inputExtension}`
+      await ffmpeg.writeFile(inputName, await fetchFile(file))
+      const onProgress = (event: { progress: number }) => {
+        setProgress(Math.max(0, Math.min(100, Math.round(event.progress * 100))))
+      }
+      ffmpeg.on('progress', onProgress)
+      try {
         setStatus('Extracting the audio locally with FFmpeg…')
         const outputName = `output.${AUDIO_OUTPUT.extension}`
         const bytes = await runFfmpeg(ffmpeg, buildWasmAudioArgs({ inputName, outputName, audioBitrate: Number(audioBitrate) }), outputName)
         const blob = new Blob([bytes.buffer as ArrayBuffer], { type: AUDIO_OUTPUT.mimeType })
         assertConverted(await inspectMedia(blob), { audioOnly: true, duration: source?.duration ?? 0, label: 'The audio encoder' })
         return finalizeBrowser(blob, AUDIO_OUTPUT)
+      } finally {
+        ffmpeg.off('progress', onProgress)
       }
-      const plans = buildWasmPlans(codec, container)
-      let lastError: unknown
-      for (const plan of plans) {
-        const outputName = `output.${CONTAINERS[plan.container].extension}`
-        try {
-          setStatus(`Encoding ${CODECS[plan.codec].name} locally with FFmpeg…`)
-          const bytes = await runFfmpeg(ffmpeg, buildWasmArgs({
-            codec: plan.codec,
-            container: plan.container,
-            encoder: plan.encoder,
-            includeSubtitles: plan.includeSubtitles,
-            rateMode,
-            lossless,
-            crf,
-            videoBitrate: Number(videoBitrate),
-            audioBitrate: Number(audioBitrate),
-            resolution,
-            frameRate,
-            speed,
-            inputName,
-            outputName,
-          }), outputName)
-          const blob = new Blob([bytes.buffer as ArrayBuffer], { type: CONTAINERS[plan.container].mimeType })
-          assertConverted(await inspectMedia(blob), {
-            codec: plan.codec,
-            audioOnly: false,
-            duration: source?.duration ?? 0,
-            label: 'The local encoder',
-          })
-          return finalizeBrowser(blob, videoOutput(plan.codec, plan.container))
-        } catch (planError) {
-          console.warn(`${plan.encoder} into ${plan.container} failed`, planError)
-          lastError = planError
-        }
-      }
-      console.error('Every local encoder failed', lastError)
-      throw new Error('this file could not be decoded — it may be damaged, or use a codec this device cannot read')
-    } finally {
-      ffmpeg.off('progress', onProgress)
     }
-  }, [source, resolution, frameRate, rateMode, videoBitrate, lossless, crf, codec, container, hardware, audioBitrate, speed, audioOnly, finalizeBrowser])
+
+    // Video has exactly one usable path: the device WebCodecs encoder. There is no
+    // WebAssembly fallback - the bundled core's x264/x265 is noasm and single-threaded and
+    // cannot finish a real clip (see the note above \`buildWasmAudioArgs\`). Trying it is
+    // what made the app look frozen at 0% forever.
+    const probeOptions: { width?: number; frameRate?: number; quality?: Quality } = { quality: encodingQuality }
+    if (targetWidth) probeOptions.width = targetWidth
+    if (targetFrameRate) probeOptions.frameRate = targetFrameRate
+    const supported = await canEncodeVideo(codec, probeOptions).catch(() => false)
+    if (!supported) {
+      throw new Error(`this device has no ${CODECS[codec].name} encoder for video — choose H.264, or use the desktop app for ${CODECS[codec].name}`)
+    }
+
+    setStatus(`Encoding ${CODECS[codec].name} with the device encoder…`)
+    const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
+    const output = new Output({ format: createOutputFormat(container), target: new BufferTarget() })
+    const conversion = await Conversion.init({
+      input,
+      output,
+      tracks: 'all',
+      video: {
+        codec,
+        quality: encodingQuality,
+        forceTranscode: true,
+        width: targetWidth,
+        frameRate: targetFrameRate,
+        keyFrameInterval: 2,
+        hardwareAcceleration: hardware ? 'prefer-hardware' : 'no-preference',
+      },
+      showWarnings: false,
+    })
+    if (!conversion.isValid) throw new Error('no browser-decodable video track in this file')
+    browserJobRef.current = conversion
+    conversion.onProgress = (value) => {
+      setProgress(Math.max(0, Math.min(100, Math.round(value * 100))))
+    }
+    try {
+      await conversion.execute()
+    } finally {
+      browserJobRef.current = null
+    }
+    if (!output.target.buffer) throw new Error('the encoder returned an empty file')
+    const produced = new Blob([output.target.buffer], { type: CONTAINERS[container].mimeType })
+    assertConverted(await inspectMedia(produced), {
+      codec,
+      audioOnly: false,
+      duration: source?.duration ?? 0,
+      label: 'The device encoder',
+    })
+    return finalizeBrowser(produced, videoOutput(codec, container))
+  }, [source, resolution, frameRate, rateMode, videoBitrate, lossless, crf, codec, container, hardware, audioBitrate, audioOnly, finalizeBrowser])
 
   const convert = useCallback(async () => {
     if (!source || isBusy) return
     startedAtRef.current = Date.now()
+    cancelRequestedRef.current = false
     setElapsed(0)
     setIsBusy(true)
     setProgress(0)
@@ -1104,7 +993,7 @@ function App() {
         setStatus(browserResult.outputDir ? `Done — saved to ${browserResult.outputDir}` : 'Done — your file is ready to download')
       }
     } catch (error) {
-      if ((error as { cancelled?: boolean }).cancelled) {
+      if ((error as { cancelled?: boolean }).cancelled || cancelRequestedRef.current) {
         setStatus('Conversion cancelled')
       } else {
         console.error(error)
@@ -1120,6 +1009,16 @@ function App() {
   const cancel = useCallback(async () => {
     const id = requestIdRef.current
     if (id) await desktop()?.cancelConvert(id)
+    // The browser path had no way out at all: Cancel used to do nothing here, so a slow
+    // device encode could only be escaped by closing the tab.
+    cancelRequestedRef.current = true
+    const job = browserJobRef.current
+    if (job) {
+      browserJobRef.current = null
+      try {
+        await job.cancel()
+      } catch { /* already finished */ }
+    }
     setStatus('Cancelling…')
   }, [])
 
@@ -1416,7 +1315,7 @@ function App() {
             <label className="field">
               <span className="field-label">Codec</span>
               <span className="field-control">
-                <select value={codec} onChange={(event) => { const next = event.target.value as CodecId; setCodec(next); setContainer((current) => containerForCodec(next, current)) }}>
+                <select value={codec} onChange={(event) => { const next = event.target.value as CodecId; codecTouchedRef.current = true; setCodec(next); setContainer((current) => containerForCodec(next, current)) }}>
                   {AVAILABLE_CODECS.map((option) => <option value={option} key={option}>{CODECS[option].label}</option>)}
                 </select>
               </span>
@@ -1431,18 +1330,28 @@ function App() {
             </label>
           </div>
 
-          {!desktopMode && (softwareCodecs.includes(codec) ? (
-            <p className="panel-note">
-              This browser has no <strong>{CODECS[codec].name}</strong> hardware encoder, so ConvZal uses its bundled
-              software encoder. It produces a real {CODECS[codec].name} file, but it is slow — minutes for a long clip.
-              <strong> H.264</strong> stays fast here, and the <strong>desktop app</strong> does {CODECS[codec].name} in seconds.
+          {!desktopMode && !audioOnly && softwareCodecs.includes(codec) && (
+            <p className="panel-note warn-note">
+              This device has no <strong>{CODECS[codec].name}</strong> video encoder, so {CODECS[codec].name} cannot be
+              produced in the browser — the only fallback is a software encoder that is far too slow (it never finished
+              a four-second clip). {' '}
+              <button
+                type="button"
+                className="inline-link"
+                onClick={() => { codecTouchedRef.current = true; setCodec('avc'); setContainer((current) => containerForCodec('avc', current)) }}
+              >
+                Switch to H.264
+              </button>{' '}
+              — it is fast here and still shrinks the file. For real {CODECS[codec].name}, use the <strong>desktop app</strong>.
             </p>
-          ) : (
+          )}
+
+          {!desktopMode && (audioOnly || !softwareCodecs.includes(codec)) && (
             <p className="panel-note">
               <strong>{CODECS[codec].name}</strong> is encoded by your device's own encoder, so it stays quick and the
               file never leaves this computer.
             </p>
-          ))}
+          )}
 
           <div className="field-row">
             <label className="field">
@@ -1500,11 +1409,7 @@ function App() {
                 <div className="progress-track" role="progressbar" aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100} aria-label="Conversion progress">
                   <span style={{ transform: `scaleX(${progress / 100})` }} />
                 </div>
-                {desktopMode ? (
-                  <button type="button" className="cancel-button" onClick={() => void cancel()}>Cancel · {elapsed}s elapsed</button>
-                ) : (
-                  <p className="status-text subtle">{elapsed}s elapsed</p>
-                )}
+                <button type="button" className="cancel-button" onClick={() => void cancel()}>Cancel · {elapsed}s elapsed</button>
               </>
             )}
 
