@@ -12,10 +12,11 @@ const devPort = Number(process.env.VITE_PORT) || 5199
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
-  // The Pages workflow sets an absolute base (`/Web_convert/`) and that is exactly right for
-  // a site served from a subfolder. Everywhere else - most of all the desktop app, which
-  // loads dist/index.html over `file://` - an absolute base points at the drive root and the
-  // window comes up blank. Relative URLs resolve correctly in both places.
+  // Relative asset URLs are right in every place this app runs: GitHub Pages serves it from
+  // a subfolder (`/ConvZal/`), and the desktop app loads dist/index.html over `file://`, where
+  // an absolute base points at the drive root and the window comes up blank. An absolute base
+  // is also what breaks a Pages site when the repository gets renamed, so the workflow no
+  // longer sets one; VITE_BASE_PATH stays only as an escape hatch for special deployments.
   base: process.env.VITE_BASE_PATH || './',
   server: {
     port: devPort,

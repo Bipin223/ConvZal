@@ -27,10 +27,13 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
+      # Deliberately no absolute VITE_BASE_PATH here. An absolute base such as
+      # `/<repo-name>/` is baked into index.html at build time and 404s the moment the
+      # repository is renamed or gains a custom domain. Vite's relative base (the default
+      # in vite.config.ts) resolves correctly from any path, including the `file://` URLs
+      # the desktop app uses.
       - name: Build
         run: npm run build
-        env:
-          VITE_BASE_PATH: /${{ github.event.repository.name }}/
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
