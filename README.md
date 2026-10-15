@@ -1,9 +1,10 @@
-# Local Encode
+# ConvZal
 
-The browser version uses WebCodecs, Mediabunny, and local FFmpeg fallbacks. The Windows desktop version bundles a native FFmpeg sidecar for reliable encoding without browser codec restrictions. Video can be encoded as H.265/HEVC, H.264/AVC, AV1, or VP9 and muxed into an MP4, MKV, MOV, or WebM container. Files are processed locally and are not uploaded.
+ConvZal converts video and extracts audio entirely on your own device. The browser version uses WebCodecs, Mediabunny, and a local FFmpeg fallback; the Windows desktop version bundles a native FFmpeg sidecar for reliable encoding without browser codec restrictions. Video can be encoded as H.265/HEVC, H.264/AVC, AV1, or VP9 and muxed into an MP4, MKV, MOV, or WebM container, and audio can be extracted to an **M4A** (AAC). Files are processed locally and are not uploaded.
 
 ## Controls
 
+- **What to keep** — *Video* keeps picture and sound; *Audio only (M4A)* drops the video and writes the soundtrack as AAC in an `.m4a` (plays on phones, cars and editors).
 - **Rate control** — either a CRF quality slider (0–51, where a higher number means a smaller file) or a target bitrate. Quick chips set the usual CRF 32 / 23 / 18 points.
 - **Lossless** — a switch that encodes bit-exactly (H.265 `lossless=1`, H.264 `-qp 0`, VP9/AV1 lossless). Files are very large; it is off by default.
 - **Encoding effort** — Fast / Balanced / Thorough maps onto each encoder's own preset (`libx265` `faster`→`slow`, SVT-AV1 10→6, and so on), which is the single biggest speed lever.
@@ -11,6 +12,12 @@ The browser version uses WebCodecs, Mediabunny, and local FFmpeg fallbacks. The 
 - **Save to** — the built-in folder browser (with breadcrumbs, an Up button, drive list and shortcuts) or the Windows folder dialog chooses the output location. The desktop result card adds **Show in folder**, **Play**, and **Save a copy**.
 
 Two long-standing freeze causes are handled explicitly: the decoder `-progress` pipe is always drained (an unread pipe used to deadlock FFmpeg), and the first *real* video stream is mapped with `0:V:0` so a cover-art / attached-picture track can no longer produce a one-frame file.
+
+## Phones and playback
+
+The in-browser build defaults to **H.264 · MP4**, which is the only codec that plays on essentially every phone, TV, and chat app. HEVC and AV1 remain selectable but are marked as less compatible, because a file a phone encodes but cannot later open is a common trap. When the device exposes the Web Share API, the result card also offers **Save to device** so the file can be saved straight into Photos / Files instead of relying on a blob download.
+
+The empty drop zone is a real `<label>` bound to a visually-hidden file input, so a tap opens the operating system's picker even on browsers that ignore a scripted `.click()` on a `display: none` input.
 
 This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
 
@@ -81,7 +88,7 @@ npm run desktop:dev
 npm run desktop:package
 ```
 
-The installer is created at `dist/Local-Encode-0.0.0-Setup.exe`. The generated `desktop/ffmpeg/ffmpeg.exe` file is ignored by Git because it is a large build artifact; run `npm run prepare:ffmpeg` again on another Windows build machine.
+The installer is created at `dist/ConvZal-0.0.0-Setup.exe`. The generated `desktop/ffmpeg/ffmpeg.exe` file is ignored by Git because it is a large build artifact; run `npm run prepare:ffmpeg` again on another Windows build machine.
 
 ## Browser support
 

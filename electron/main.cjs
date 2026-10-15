@@ -16,10 +16,10 @@ const CODECS = {
   vp9: { encoders: ['libvpx-vp9'] },
 }
 
-const CONTAINERS = { mp4: 'mp4', mkv: 'mkv', mov: 'mov', webm: 'webm' }
+const CONTAINERS = { mp4: 'mp4', mkv: 'mkv', mov: 'mov', webm: 'webm', m4a: 'm4a' }
 
 // Keeps the file written to disk named like the download the renderer offers (`*-h264.mp4`, not `*-avc.mp4`).
-const CODEC_SLUGS = { hevc: 'hevc', avc: 'h264', av1: 'av1', vp9: 'vp9' }
+const CODEC_SLUGS = { hevc: 'hevc', avc: 'h264', av1: 'av1', vp9: 'vp9', aac: 'audio' }
 
 // Containers and codecs must stay mutually valid, so anything unsupported falls back.
 const CONTAINERS_BY_CODEC = {
@@ -200,6 +200,18 @@ function buildArgs(options, codec, container, encoder) {
   return args
 }
 
+// Audio-only path: pull the first real audio stream out to AAC and drop the video.
+// `-map 0:a:0` also skips any attached-picture stream that might be ordered first.
+function buildAudioArgs(options) {
+  return [
+    '-y', '-nostdin', '-i', options.inputPath,
+    '-map', '0:a:0', '-vn',
+    '-c:a', 'aac', '-b:a', `${options.audioBitrate}k`,
+    '-movflags', '+faststart',
+    '-progress', 'pipe:1', options.outputPath,
+  ]
+}
+
 /* ==========================================================================
    Hardware probing
    ========================================================================== */
@@ -358,6 +370,17 @@ async function convertVideo(event, options) {
     baseDir = app.getPath('downloads')
   }
 
+  // Audio-only is a single encoder (AAC in an `.m4a`), so it skips the plan chain.
+  if (options.audioOnly) {
+    const outputPath = resolveOutputPath(options.inputPath, baseDir, 'aac', CONTAINERS.m4a)
+    await fs.rm(outputPath, { force: true }).catch(() => {})
+    await fs.mkdir(path.dirname(outputPath), { recursive: true }).catch(() => {})
+    await runFfmpeg(buildAudioArgs({ ...options, outputPath }), requestId, reportProgress)
+    const stats = await fs.stat(outputPath).catch(() => null)
+    if (!stats || stats.size === 0) throw new Error('FFmpeg finished without writing an audio file')
+    return { outputPath, codec: 'aac', container: 'm4a', encoder: 'aac', size: stats.size, sizeLabel: formatBytes(stats.size) }
+  }
+
   let lastError
   for (const plan of plans) {
     const outputPath = resolveOutputPath(options.inputPath, baseDir, plan.codec, CONTAINERS[plan.container])
@@ -432,7 +455,8 @@ function probeMediaFile(filePath) {
         if (frameRate) fps = parseFloat(frameRate[1])
       }
       const hasAudio = /Stream #\d+:\d+.*Audio:/.test(stderr)
-      resolve({ ok: videoLine !== undefined, duration, width, height, fps, hasAudio })
+      // Audio-only sources (`.m4a`, `.mp3`) have no video line but are still valid input.
+      resolve({ ok: videoLine !== undefined || hasAudio, duration, width, height, fps, hasAudio })
     })
   })
 }
@@ -610,7 +634,7 @@ function createWindow() {
     minWidth: 960,
     minHeight: 720,
     backgroundColor: '#0d0a15',
-    title: 'Rizal_convert',
+    title: 'ConvZal',
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,

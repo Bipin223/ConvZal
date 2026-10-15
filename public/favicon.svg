@@ -7,5 +7,5 @@
   </defs>
   <rect width="64" height="64" rx="18" fill="#171221"/>
   <circle cx="32" cy="32" r="22" fill="url(#g)"/>
-  <path d="M25 18h7v21h10v7H25z" fill="#fff"/>
+  <text x="32" y="45" font-family="Arial, Helvetica, sans-serif" font-size="38" font-weight="700" fill="#fff" text-anchor="middle">C</text>
 </svg>

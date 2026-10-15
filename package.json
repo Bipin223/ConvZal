@@ -1,8 +1,8 @@
 {
-  "name": "web-convert",
+  "name": "convzal",
   "private": true,
   "version": "0.0.0",
-  "description": "Rizal_convert browser and Windows video conversion to H.265/HEVC",
+  "description": "ConvZal — local video and MP4 conversion in the browser and on Windows",
   "author": "Bipin Rizal",
   "type": "module",
   "scripts": {
@@ -35,7 +35,7 @@
   "main": "electron/main.cjs",
   "build": {
     "appId": "com.bipin.localencode",
-    "productName": "Rizal_convert",
+    "productName": "ConvZal",
     "files": [
       "dist/**/*",
       "electron/**/*",
@@ -49,7 +49,7 @@
     ],
     "win": {
       "target": "nsis",
-      "artifactName": "Rizal_convert-${version}-Setup.${ext}"
+      "artifactName": "ConvZal-${version}-Setup.${ext}"
     },
     "nsis": {
       "oneClick": false,

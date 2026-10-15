@@ -1,5 +1,5 @@
 /* ===========================================================================
-   Rizal_convert — "deep violet" theme.
+   ConvZal — "deep violet" theme.
 
    Dark is the designed-for appearance; the light set on :root is the fallback
    for the theme toggle. Two panes stay: source + destination on the left,
@@ -309,6 +309,47 @@
 .drop-zone small { color: var(--on-surface-variant); font-size: 11.5px; }
 .drop-formats { color: var(--on-surface-faint) !important; font-size: 10px !important; margin-top: 5px; letter-spacing: .04em; }
 
+/* The empty state is a real `<label>` so a phone tap opens the OS picker natively. */
+.drop-empty {
+  display: flex;
+  flex: 1 1 auto;
+  align-self: stretch;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  width: 100%;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.drop-cta {
+  margin-top: 12px;
+  padding: 9px 18px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(140deg, var(--accent-soft), var(--accent));
+  box-shadow: 0 8px 22px rgba(142, 69, 241, .35);
+  transition: transform .3s var(--ease-move), box-shadow .3s var(--ease-move);
+}
+.drop-zone:hover .drop-cta,
+.drop-zone:focus-visible .drop-cta { transform: translateY(-2px); box-shadow: 0 12px 26px rgba(142, 69, 241, .45); }
+
+/* A file input that stays focusable/clickable for mobile, unlike `display: none`. */
+.sr-only-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 .source-card { display: flex; flex-direction: column; align-items: center; gap: 5px; width: 100%; animation: enter .4s var(--ease-settle) both; }
 .source-badge {
   display: grid;
@@ -384,6 +425,18 @@
   border-bottom: 1px solid var(--outline);
 }
 .format-value { margin-left: auto; color: var(--accent-bright); font-size: 12px; font-weight: 600; text-align: right; }
+
+.panel-note {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--outline);
+  border-radius: 12px;
+  background: var(--field-bg);
+  color: var(--on-surface-variant);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+.panel-note strong { color: var(--on-surface); }
 
 .field-block {
   display: grid;
@@ -638,6 +691,7 @@
 
 .status-text { margin: 0; color: var(--on-surface-faint); font-size: 10.5px; line-height: 1.4; text-align: center; }
 .status-text.subtle { font-variant-numeric: tabular-nums; }
+.status-text.warn { color: var(--warn, #f0b429); font-weight: 600; }
 
 /* ------------------------------------------------------------- result */
 .result-card {

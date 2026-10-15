@@ -54,6 +54,7 @@ type Source = {
   height: number
   path?: string
   file?: File
+  hasAudio?: boolean
 }
 
 type ConvertResult = {
@@ -61,8 +62,8 @@ type ConvertResult = {
   path?: string
   url?: string
   sizeLabel: string
-  codec: CodecId
-  container: ContainerId
+  codecName: string
+  containerName: string
   outputDir?: string
 }
 
@@ -107,7 +108,7 @@ declare global {
 
 /* -------------------------------------------------------------- constants */
 
-const CODEC_ORDER: CodecId[] = ['hevc', 'avc', 'av1', 'vp9']
+const CODEC_ORDER: CodecId[] = ['avc', 'hevc', 'av1', 'vp9']
 const CONTAINER_ORDER: ContainerId[] = ['mp4', 'mkv', 'mov', 'webm']
 
 const CODECS: Record<CodecId, { label: string; name: string; slug: string; containers: ContainerId[] }> = {
@@ -123,6 +124,9 @@ const CONTAINERS: Record<ContainerId, { label: string; extension: string; mimeTy
   mov: { label: 'MOV', extension: 'mov', mimeType: 'video/quicktime' },
   webm: { label: 'WebM', extension: 'webm', mimeType: 'video/webm' },
 }
+
+// Audio-only output: always AAC in an `.m4a` so it plays everywhere (phone, car, editor).
+const AUDIO_OUTPUT = { slug: 'audio', extension: 'm4a', codecName: 'AAC', containerName: 'M4A', mimeType: 'audio/mp4' }
 
 // Quick buttons over the CRF slider. Lower CRF is better quality and a bigger file;
 // the slider runs the other way so "drag right = smaller".
@@ -157,6 +161,9 @@ const SOFTWARE_ENCODERS: Record<CodecId, string[]> = {
 }
 
 const VIDEO_ACCEPT = 'video/*,.mp4,.m4v,.mkv,.mov,.webm,.avi,.wmv,.flv,.ts,.m2ts,.mts,.mpg,.mpeg,.3gp,.ogv'
+const AUDIO_ACCEPT = 'audio/*,.mp3,.m4a,.aac,.flac,.wav,.ogg,.opus,.wma,.aiff'
+// Video and audio are both accepted so the audio-only mode can be fed a music file too.
+const MEDIA_ACCEPT = `${VIDEO_ACCEPT},${AUDIO_ACCEPT}`
 
 /* ---------------------------------------------------------------- helpers */
 
@@ -209,18 +216,39 @@ function codecForContainer(container: ContainerId, codec: CodecId): CodecId {
   return CODEC_ORDER.find((candidate) => CODECS[candidate].containers.includes(container)) ?? 'avc'
 }
 
+// The native engine reports raw codes; the audio path uses `aac` / `m4a`, which are not
+// in the video matrices, so display names are resolved defensively.
+function codecDisplayName(codec: string) {
+  if (codec === 'aac') return AUDIO_OUTPUT.codecName
+  return CODECS[codec as CodecId]?.name ?? codec.toUpperCase()
+}
+
+function containerDisplayName(container: string) {
+  if (container === 'm4a') return AUDIO_OUTPUT.containerName
+  return CONTAINERS[container as ContainerId]?.label ?? container.toUpperCase()
+}
+
 // A local media probe that never touches the disk: the browser decodes the header only.
-function probeBlob(file: File): Promise<{ duration: number; width: number; height: number }> {
+function probeBlob(file: File): Promise<{ duration: number; width: number; height: number; hasAudio?: boolean }> {
   return new Promise((resolve) => {
     const video = document.createElement('video')
     const url = URL.createObjectURL(file)
-    const done = (duration: number, width: number, height: number) => {
+    const done = (duration: number, width: number, height: number, hasAudio?: boolean) => {
       video.removeAttribute('src')
       URL.revokeObjectURL(url)
-      resolve({ duration, width, height })
+      resolve({ duration, width, height, hasAudio })
     }
     video.preload = 'metadata'
-    video.onloadedmetadata = () => done(Number.isFinite(video.duration) ? video.duration : 0, video.videoWidth || 0, video.videoHeight || 0)
+    video.onloadedmetadata = () => {
+      const element = video as HTMLVideoElement & { mozHasAudio?: boolean; audioTracks?: { length: number } }
+      // No single property works everywhere, so the audio track is inferred when possible.
+      const hasAudio = typeof element.mozHasAudio === 'boolean'
+        ? element.mozHasAudio
+        : element.audioTracks
+          ? element.audioTracks.length > 0
+          : undefined
+      done(Number.isFinite(video.duration) ? video.duration : 0, video.videoWidth || 0, video.videoHeight || 0, hasAudio)
+    }
     video.onerror = () => done(0, 0, 0)
     video.src = url
   })
@@ -302,6 +330,17 @@ function buildWasmArgs(o: WasmArgs): string[] {
   return args
 }
 
+// Audio-only WASM path: AAC in `.m4a`, mirroring the native `buildAudioArgs`.
+function buildWasmAudioArgs(o: { inputName: string; outputName: string; audioBitrate: number }): string[] {
+  return [
+    '-y', '-i', o.inputName,
+    '-map', '0:a:0', '-vn',
+    '-c:a', 'aac', '-b:a', `${o.audioBitrate}k`,
+    '-movflags', '+faststart',
+    o.outputName,
+  ]
+}
+
 function buildWasmPlans(codec: CodecId, container: ContainerId): { codec: CodecId; container: ContainerId; encoder: string; includeSubtitles: boolean }[] {
   const plans: { codec: CodecId; container: ContainerId; encoder: string; includeSubtitles: boolean }[] = []
   const seen = new Set<string>()
@@ -324,6 +363,10 @@ function createOutputFormat(container: ContainerId): OutputFormat {
   if (container === 'webm') return new WebMOutputFormat()
   if (container === 'mov') return new MovOutputFormat({ fastStart: 'in-memory' })
   return new Mp4OutputFormat({ fastStart: 'in-memory' })
+}
+
+function videoOutput(codec: CodecId, container: ContainerId) {
+  return { slug: CODECS[codec].slug, extension: CONTAINERS[container].extension, codecName: CODECS[codec].name, containerName: CONTAINERS[container].label }
 }
 
 /* ------------------------------------------------------------ primitives */
@@ -603,7 +646,10 @@ function App() {
   const [source, setSource] = useState<Source | null>(null)
   const [result, setResult] = useState<ConvertResult | null>(null)
 
-  const [codec, setCodec] = useState<CodecId>('hevc')
+  // H.264 is the only codec that plays on essentially every phone, TV and app, so the
+  // in-browser (and therefore mobile) build defaults to it. The desktop build has a
+  // full FFmpeg and defaults to the smaller HEVC.
+  const [codec, setCodec] = useState<CodecId>(() => (desktop() ? 'hevc' : 'avc'))
   const [container, setContainer] = useState<ContainerId>('mp4')
   const [rateMode, setRateMode] = useState<RateMode>('crf')
   const [lossless, setLossless] = useState(false)
@@ -614,6 +660,7 @@ function App() {
   const [audioBitrate, setAudioBitrate] = useState('192')
   const [speed, setSpeed] = useState<SpeedId>('balanced')
   const [hardware, setHardware] = useState(false)
+  const [audioOnly, setAudioOnly] = useState(false)
 
   const [outputDir, setOutputDir] = useState('')
   const [browserMode, setBrowserMode] = useState<'file' | 'folder' | null>(null)
@@ -631,6 +678,16 @@ function App() {
   const codecName = CODECS[codec].name
   const containerLabel = CONTAINERS[container].label
   const hardwareAvailable = desktopMode
+  // The dropdowns stay in sync with audio-only so the summary and button always agree.
+  const activeCodecName = audioOnly ? AUDIO_OUTPUT.codecName : codecName
+  const activeContainerLabel = audioOnly ? AUDIO_OUTPUT.containerName : containerLabel
+  // Desktop probes the streams, so a silent clip is caught before the encode is attempted.
+  const audioMissing = audioOnly && source?.hasAudio === false
+  // Shown on phones/tablets, where a blob download often never reaches the gallery.
+  const canShareFiles = !desktopMode
+    && typeof navigator !== 'undefined'
+    && typeof navigator.canShare === 'function'
+    && typeof navigator.share === 'function'
 
   /* ---------------------------------------------------------- lifecycle */
 
@@ -652,15 +709,15 @@ function App() {
 
   const adoptBlob = useCallback(async (file: File) => {
     const meta = await probeBlob(file)
-    setSource({ name: file.name, size: file.size, duration: meta.duration, width: meta.width, height: meta.height, file })
+    setSource({ name: file.name, size: file.size, duration: meta.duration, width: meta.width, height: meta.height, hasAudio: meta.hasAudio, file })
     setResult(null)
     setProgress(0)
-    setStatus('Video ready to convert')
+    setStatus('Media ready to convert')
   }, [])
 
   const adoptPath = useCallback(async (targetPath: string) => {
     const api = desktop()
-    setStatus('Reading video details…')
+    setStatus('Reading media details…')
     const [info, stats] = await Promise.all([
       api ? api.probeMedia(targetPath) : Promise.resolve<MediaProbe>({ ok: false, duration: 0, width: 0, height: 0 }),
       api ? api.statPath(targetPath) : Promise.resolve<{ ok: boolean; size?: number; sizeLabel?: string }>({ ok: false }),
@@ -671,11 +728,12 @@ function App() {
       duration: info.duration || 0,
       width: info.width || 0,
       height: info.height || 0,
+      hasAudio: info.hasAudio,
       path: targetPath,
     })
     setResult(null)
     setProgress(0)
-    setStatus('Video ready to convert')
+    setStatus('Media ready to convert')
   }, [])
 
   const adoptDropped = useCallback(async (file: File) => {
@@ -693,7 +751,7 @@ function App() {
     // Browsers get the native picker, which already has Up / breadcrumbs.
     if (window.showOpenFilePicker) {
       try {
-        const [handle] = await window.showOpenFilePicker({ multiple: false, types: [{ description: 'Video', accept: { 'video/*': ['.mp4', '.m4v', '.mkv', '.mov', '.webm', '.avi', '.wmv', '.flv', '.ts', '.mpg', '.mpeg', '.3gp', '.ogv'] } }] })
+        const [handle] = await window.showOpenFilePicker({ multiple: false, types: [{ description: 'Video or audio', accept: { 'video/*': ['.mp4', '.m4v', '.mkv', '.mov', '.webm', '.avi', '.wmv', '.flv', '.ts', '.mpg', '.mpeg', '.3gp', '.ogv'], 'audio/*': ['.mp3', '.m4a', '.aac', '.flac', '.wav', '.ogg', '.opus', '.wma', '.aiff'] } }] })
         if (handle) await adoptBlob(await handle.getFile())
         return
       } catch (pickerError) {
@@ -740,8 +798,8 @@ function App() {
 
   /* --------------------------------------------------------- conversion */
 
-  const finalizeBrowser = useCallback(async (blob: Blob, resultCodec: CodecId, resultContainer: ContainerId): Promise<ConvertResult> => {
-    const name = `${source?.name.replace(/\.[^/.]+$/, '') || 'output'}-${CODECS[resultCodec].slug}.${CONTAINERS[resultContainer].extension}`
+  const finalizeBrowser = useCallback(async (blob: Blob, output: { slug: string; extension: string; codecName: string; containerName: string }): Promise<ConvertResult> => {
+    const name = `${source?.name.replace(/\.[^/.]+$/, '') || 'output'}-${output.slug}.${output.extension}`
     let saved = false
     if (outputHandleRef.current) {
       try {
@@ -758,8 +816,8 @@ function App() {
       name,
       url: URL.createObjectURL(blob),
       sizeLabel: formatBytes(blob.size),
-      codec: resultCodec,
-      container: resultContainer,
+      codecName: output.codecName,
+      containerName: output.containerName,
       outputDir: saved ? outputHandleRef.current?.name : undefined,
     }
   }, [source])
@@ -774,7 +832,8 @@ function App() {
       : new Quality({ quantizer: lossless ? 0 : crf })
 
     // Device / WebCodecs encoder first: it produces a properly muxed file and is fast.
-    const probe = await canEncodeVideo(codec, { width: targetWidth, frameRate: targetFrameRate }).catch(() => true as const)
+    // Audio-only always goes through FFmpeg WASM, whose AAC encoder is dependable.
+    const probe = audioOnly ? false : await canEncodeVideo(codec, { width: targetWidth, frameRate: targetFrameRate }).catch(() => true as const)
     if (probe !== false) {
       try {
         setStatus(`Encoding ${CODECS[codec].name} with the device encoder…`)
@@ -801,7 +860,7 @@ function App() {
         }
         await conversion.execute()
         if (!output.target.buffer) throw new Error('The encoder returned an empty file')
-        return finalizeBrowser(new Blob([output.target.buffer], { type: CONTAINERS[container].mimeType }), codec, container)
+        return finalizeBrowser(new Blob([output.target.buffer], { type: CONTAINERS[container].mimeType }), videoOutput(codec, container))
       } catch (deviceError) {
         console.warn('Device encoder unavailable, falling back to FFmpeg WASM', deviceError)
       }
@@ -826,6 +885,14 @@ function App() {
     ffmpeg.on('progress', onProgress)
 
     try {
+      if (audioOnly) {
+        setStatus('Extracting the audio locally with FFmpeg…')
+        const outputName = `output.${AUDIO_OUTPUT.extension}`
+        await ffmpeg.exec(buildWasmAudioArgs({ inputName, outputName, audioBitrate: Number(audioBitrate) }))
+        const data = await ffmpeg.readFile(outputName)
+        const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data
+        return finalizeBrowser(new Blob([bytes.buffer as ArrayBuffer], { type: AUDIO_OUTPUT.mimeType }), AUDIO_OUTPUT)
+      }
       const plans = buildWasmPlans(codec, container)
       let lastError: unknown
       for (const plan of plans) {
@@ -850,7 +917,7 @@ function App() {
           }))
           const data = await ffmpeg.readFile(outputName)
           const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data
-          return finalizeBrowser(new Blob([bytes.buffer as ArrayBuffer], { type: CONTAINERS[plan.container].mimeType }), plan.codec, plan.container)
+          return finalizeBrowser(new Blob([bytes.buffer as ArrayBuffer], { type: CONTAINERS[plan.container].mimeType }), videoOutput(plan.codec, plan.container))
         } catch (planError) {
           console.warn(`${plan.encoder} into ${plan.container} failed`, planError)
           lastError = planError
@@ -860,7 +927,7 @@ function App() {
     } finally {
       ffmpeg.off('progress', onProgress)
     }
-  }, [source, resolution, frameRate, rateMode, videoBitrate, lossless, crf, codec, container, hardware, audioBitrate, speed, finalizeBrowser])
+  }, [source, resolution, frameRate, rateMode, videoBitrate, lossless, crf, codec, container, hardware, audioBitrate, speed, audioOnly, finalizeBrowser])
 
   const convert = useCallback(async () => {
     if (!source || isBusy) return
@@ -888,6 +955,7 @@ function App() {
             inputPath: source.path,
             codec,
             container,
+            audioOnly,
             mode: rateMode === 'crf' && lossless ? 'lossless' : 'crf',
             rateControl: rateMode,
             crf,
@@ -896,7 +964,7 @@ function App() {
             resolution,
             frameRate,
             speed,
-            hardware,
+            hardware: audioOnly ? false : hardware,
             outputDir: outputDir || undefined,
           })
           setProgress(100)
@@ -904,11 +972,11 @@ function App() {
             name: basename(nativeResult.outputPath),
             path: nativeResult.outputPath,
             sizeLabel: nativeResult.sizeLabel || formatBytes(nativeResult.size),
-            codec: nativeResult.codec as CodecId,
-            container: nativeResult.container as ContainerId,
+            codecName: codecDisplayName(nativeResult.codec),
+            containerName: containerDisplayName(nativeResult.container),
             outputDir: outputDir || undefined,
           })
-          setStatus(`Done — ${CODECS[nativeResult.codec as CodecId].label} written to disk`)
+          setStatus(`Done — ${containerDisplayName(nativeResult.container)} written to disk`)
         } finally {
           unsubscribe?.()
         }
@@ -930,7 +998,7 @@ function App() {
       setIsBusy(false)
       requestIdRef.current = ''
     }
-  }, [source, isBusy, codec, container, rateMode, lossless, crf, videoBitrate, audioBitrate, resolution, frameRate, speed, hardware, outputDir, runBrowserConversion])
+  }, [source, isBusy, codec, container, audioOnly, rateMode, lossless, crf, videoBitrate, audioBitrate, resolution, frameRate, speed, hardware, outputDir, runBrowserConversion])
 
   const cancel = useCallback(async () => {
     const id = requestIdRef.current
@@ -959,6 +1027,20 @@ function App() {
     if (target) setStatus(`Copied to ${target}`)
   }, [result])
 
+  // Phones rarely honour an `<a download>` on a blob, so the share sheet (which can save
+  // straight into Photos / Files) is offered whenever the browser supports sharing files.
+  const shareResult = useCallback(async () => {
+    if (!result?.url) return
+    try {
+      const blob = await (await fetch(result.url)).blob()
+      const file = new File([blob], result.name, { type: blob.type || 'video/mp4' })
+      await navigator.share?.({ files: [file], title: result.name })
+      setStatus('Use the share sheet to save it to this device')
+    } catch (error) {
+      if ((error as { name?: string })?.name !== 'AbortError') setStatus('Could not open the share sheet — use Download instead')
+    }
+  }, [result])
+
   /* ---------------------------------------------------------------- view */
 
   const sourceMeta = source
@@ -970,11 +1052,11 @@ function App() {
       <div className="aurora" aria-hidden="true" />
 
       <header className="topbar">
-        <a className="brand" href="/" aria-label="Rizal_convert home">
-          <span className="brand-mark">R</span>
+        <a className="brand" href="/" aria-label="ConvZal home">
+          <span className="brand-mark">C</span>
           <span className="brand-copy">
-            <span className="brand-name">RIZAL_CONVERT</span>
-            <span className="brand-tag">Local video optimiser</span>
+            <span className="brand-name">CONVZAL</span>
+            <span className="brand-tag">Video &amp; MP4 converter</span>
           </span>
         </a>
         <div className="topbar-actions">
@@ -1003,8 +1085,8 @@ function App() {
       </header>
 
       <section className="intro">
-        <p className="eyebrow"><span aria-hidden="true" />LOCAL VIDEO OPTIMISER</p>
-        <h1>Make your video <em>lighter</em>.</h1>
+        <p className="eyebrow"><span aria-hidden="true" />LOCAL VIDEO CONVERTER</p>
+        <h1>Video and <em>MP4</em> converter.</h1>
         <p className="intro-sub">Shrink it locally, keep the quality. Nothing ever leaves this device.</p>
       </section>
 
@@ -1013,18 +1095,16 @@ function App() {
         <div className="upload-panel">
           <input
             ref={inputRef}
+            id="media-input"
             type="file"
-            accept={VIDEO_ACCEPT}
-            style={{ display: 'none' }}
+            accept={MEDIA_ACCEPT}
+            className="sr-only-input"
+            aria-label="Choose a media file"
             onChange={(event) => { const next = event.target.files?.[0]; if (next) void adoptDropped(next); event.target.value = '' }}
           />
 
           <div
             className={`drop-zone ${source ? 'has-file' : ''} ${isDragging ? 'dragging' : ''}`}
-            role="button"
-            tabIndex={0}
-            onClick={() => { if (!source) void openFileBrowser() }}
-            onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void openFileBrowser() } }}
             onDragOver={(event) => { event.preventDefault(); setIsDragging(true) }}
             onDragLeave={() => setIsDragging(false)}
             onDrop={(event) => {
@@ -1042,19 +1122,35 @@ function App() {
                 <strong className="source-name">{source.name}</strong>
                 <small className="source-meta">{sourceMeta || 'Ready to convert'}</small>
                 <div className="source-actions">
-                  <button type="button" className="ghost-button" onClick={(event) => { event.stopPropagation(); void openFileBrowser() }}>Change</button>
-                  <button type="button" className="ghost-button" onClick={(event) => { event.stopPropagation(); clearSource() }}>Remove</button>
+                  <button type="button" className="ghost-button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); void openFileBrowser() }}>Change</button>
+                  <button type="button" className="ghost-button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); clearSource() }}>Remove</button>
                 </div>
               </div>
             ) : (
-              <>
+              // A real `<label>`: on phones the label's native activation opens the file
+              // picker even where `showOpenFilePicker` is missing or a JS `.click()` is
+              // ignored. Desktop keeps the nicer in-app / system picker.
+              <label
+                className="drop-empty"
+                htmlFor="media-input"
+                role="button"
+                tabIndex={0}
+                onClick={(event) => {
+                  if (desktop() || window.showOpenFilePicker) {
+                    event.preventDefault()
+                    void openFileBrowser()
+                  }
+                }}
+                onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void openFileBrowser() } }}
+              >
                 <span className="upload-glyph" aria-hidden="true">
                   <svg viewBox="0 0 24 24"><path d="M12 19V6M6 11.6 12 5.6l6 6" /></svg>
                 </span>
-                <strong className="drop-title">Drop a video here</strong>
-                <small>or click to browse your files</small>
-                <small className="drop-formats">MP4 · MOV · MKV · AVI · WEBM and more</small>
-              </>
+                <strong className="drop-title">Drop a video or audio file</strong>
+                <small>or tap to browse this device</small>
+                <span className="drop-cta">Choose a file</span>
+                <small className="drop-formats">MP4 · MOV · MKV · M4A · MP3 · WAV and more</small>
+              </label>
             )}
           </div>
 
@@ -1084,11 +1180,31 @@ function App() {
         <aside className="settings-panel">
           <div className="panel-heading"><span>01</span><h2>Output settings</h2></div>
 
+          <Segmented<'video' | 'audio'>
+            label="What to keep"
+            hint={audioOnly ? 'Audio only' : 'Video + audio'}
+            options={[
+              { id: 'video', label: 'Video' },
+              { id: 'audio', label: 'Audio only (M4A)' },
+            ]}
+            value={audioOnly ? 'audio' : 'video'}
+            onChange={(next) => setAudioOnly(next === 'audio')}
+            sentence
+          />
+
           <div className="format-summary">
             <span className="field-label">Format</span>
-            <span className="format-value">{CODECS[codec].label} · {containerLabel}</span>
+            <span className="format-value">{activeCodecName} · {activeContainerLabel}</span>
           </div>
 
+          {audioOnly && (
+            <p className="panel-note">
+              The video is dropped and the soundtrack is saved as AAC in an <strong>.m4a</strong> — plays on phones,
+              cars and editors. Set the bitrate below; 192–256 kbps suits most music.
+            </p>
+          )}
+
+          {!audioOnly && (<>
           <div className="field-block">
             <Segmented<RateMode>
               label="Rate control"
@@ -1198,6 +1314,13 @@ function App() {
             </label>
           </div>
 
+          {!desktopMode && codec !== 'avc' && (
+            <p className="panel-note">
+              Heads up: <strong>H.264 · MP4</strong> plays on virtually every phone, TV and app. HEVC and AV1 files
+              may not open on some devices or in chat apps.
+            </p>
+          )}
+
           <div className="field-row">
             <label className="field">
               <span className="field-label">Resolution</span>
@@ -1225,11 +1348,13 @@ function App() {
               </span>
             </label>
           </div>
+          </>)}
 
           <label className="field">
             <span className="field-label">Audio bitrate</span>
             <span className="field-control">
               <select value={audioBitrate} onChange={(event) => setAudioBitrate(event.target.value)}>
+                <option value="64">64 kbps</option>
                 <option value="96">96 kbps</option>
                 <option value="128">128 kbps</option>
                 <option value="192">192 kbps</option>
@@ -1240,10 +1365,12 @@ function App() {
           </label>
 
           <div className="action-zone">
-            <button className="convert-button" type="button" disabled={!source || isBusy} onClick={() => void convert()}>
-              <span className="convert-label">{isBusy ? 'Encoding' : `Convert to ${codecName}`}</span>
+            <button className="convert-button" type="button" disabled={!source || isBusy || audioMissing} onClick={() => void convert()}>
+              <span className="convert-label">{isBusy ? 'Encoding' : audioOnly ? 'Extract audio (M4A)' : `Convert to ${codecName}`}</span>
               <span className="button-arrow" aria-hidden="true">{isBusy ? `${progress}%` : '↗'}</span>
             </button>
+
+            {audioMissing && <p className="status-text warn">This file has no audio track to extract.</p>}
 
             {isBusy && (
               <>
@@ -1268,7 +1395,7 @@ function App() {
                   </span>
                   <span className="result-copy">
                     <strong title={result.name}>{result.name}</strong>
-                    <small>{result.sizeLabel} · {CODECS[result.codec].name} · {CONTAINERS[result.container].label}</small>
+                    <small>{result.sizeLabel} · {result.codecName} · {result.containerName}</small>
                   </span>
                 </div>
                 <div className="result-actions">
@@ -1279,10 +1406,15 @@ function App() {
                       <button type="button" className="ghost-button" onClick={() => void saveResultCopy()}>Save a copy</button>
                     </>
                   ) : (
-                    <a className="download-button" href={result.url} download={result.name}>
-                      <span className="download-label">Download {result.name}</span>
-                      <span aria-hidden="true">↓</span>
-                    </a>
+                    <>
+                      <a className="download-button" href={result.url} download={result.name}>
+                        <span className="download-label">Download {result.name}</span>
+                        <span aria-hidden="true">↓</span>
+                      </a>
+                      {canShareFiles && (
+                        <button type="button" className="ghost-button" onClick={() => void shareResult()}>Save to device</button>
+                      )}
+                    </>
                   )}
                 </div>
                 {result.path && <small className="result-path" title={result.path}>{result.path}</small>}
