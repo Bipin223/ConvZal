@@ -287,6 +287,70 @@ function planTargetSize(input: {
   }
 }
 
+// ---------------------------------------------------- expected output size
+// A CRF encode has no size until it runs, so the honest answer is a measurement: the same
+// encoder, the same settings, three short samples taken from the start, middle and end of
+// the clip, scaled by duration. That is within a few percent for normal footage and beats
+// any bitrate arithmetic (the browser encoder ignores bitrate entirely).
+const estimateCache = new Map<string, number>()
+let estimateJob: Conversion | null = null
+
+function cancelSizeEstimate() {
+  try { estimateJob?.cancel() } catch { /* already done */ }
+  estimateJob = null
+}
+
+async function measureOutputBytes(options: {
+  file: File
+  codec: CodecId
+  container: ContainerId
+  quality: Quality
+  width?: number
+  frameRate?: number
+  duration: number
+  audioBytes: number
+  hardware: boolean
+}): Promise<number | null> {
+  const { file, codec, container, quality, width, frameRate, duration } = options
+  if (!(duration > 2)) return null
+  const sampleSeconds = Math.min(3, Math.max(1, duration / 8))
+  const starts = [0.12, 0.5, 0.88].map((fraction) => Math.max(0, Math.min(duration - sampleSeconds, duration * fraction)))
+  let bytes = 0
+  let seconds = 0
+  for (const start of starts) {
+    const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
+    const output = new Output({ format: createOutputFormat(container), target: new BufferTarget() })
+    const conversion = await Conversion.init({
+      input,
+      output,
+      tracks: 'all',
+      trim: { start, end: start + sampleSeconds },
+      audio: { discard: true },
+      video: {
+        codec,
+        quality,
+        forceTranscode: true,
+        width,
+        frameRate,
+        keyFrameInterval: 2,
+        hardwareAcceleration: options.hardware ? 'prefer-hardware' : 'no-preference',
+      },
+      showWarnings: false,
+    })
+    if (!conversion.isValid) return null
+    estimateJob = conversion
+    try {
+      await conversion.execute()
+    } finally {
+      estimateJob = null
+    }
+    bytes += output.target.buffer?.byteLength ?? 0
+    seconds += sampleSeconds
+  }
+  if (!seconds || !bytes) return null
+  return (bytes / seconds) * duration + options.audioBytes
+}
+
 function formatDuration(seconds: number) {
   if (!Number.isFinite(seconds) || seconds <= 0) return '—'
   const total = Math.round(seconds)
@@ -821,16 +885,95 @@ function App() {
       })
     : null), [rateMode, source, targetSizeMb, audioBitrate])
 
+  // Declared up here because the size-estimate effect below reads them; their hook order is
+  // otherwise unchanged.
+  const [isBusy, setIsBusy] = useState(false)
+  const [desktopMode, setDesktopMode] = useState(false)
+
+  // Expected size for the manual modes. CRF is *measured* (three short samples through the
+  // same encoder), target size already knows its budget, and bitrate is arithmetic for the
+  // native engine. The browser hides Bitrate because its encoder ignores the number, so an
+  // "estimate" there would be fiction.
+  const [sizeEstimate, setSizeEstimate] = useState<{ bytes: number; measured: boolean } | null>(null)
+  const [estimateBusy, setEstimateBusy] = useState(false)
+
+  useEffect(() => {
+    setSizeEstimate(null)
+    setEstimateBusy(false)
+    if (!source || audioOnly || isBusy) return
+    const duration = source.duration || 0
+    const audioBps = (Number(audioBitrate) || 0) * 1000
+    const audioBytes = (audioBps * duration) / 8
+
+    if (rateMode === 'bitrate') {
+      const bytes = (((Number(videoBitrate) || 0) * 1000 + audioBps) * duration) / 8
+      if (bytes > 0) setSizeEstimate({ bytes: bytes * 1.02, measured: false })
+      return
+    }
+    if (rateMode === 'size') {
+      if (sizePlan) setSizeEstimate({ bytes: sizePlan.estimatedBytes, measured: false })
+      return
+    }
+    // CRF in the desktop build is encoded by FFmpeg, which this measurement cannot sample.
+    if (desktopMode || !source.file) return
+
+    const requestWidth = resolution === 'source' ? undefined : Number(resolution)
+    const outputWidth = requestWidth ?? (source.width || 1920)
+    const outputHeight = Math.max(2, Math.round((outputWidth * (source.height || 1080)) / (source.width || 1920)))
+    const quality = lossless ? new Quality({ quantizer: 0 }) : crfQuality(codec, outputWidth, outputHeight, crf)
+    const key = [source.name, source.size, Math.round(duration), codec, container, crf, lossless ? 1 : 0, resolution, frameRate, audioBitrate, hardware ? 1 : 0].join('|')
+    const cached = estimateCache.get(key)
+    if (cached) {
+      setSizeEstimate({ bytes: cached, measured: true })
+      return
+    }
+
+    let cancelled = false
+    setEstimateBusy(true)
+    const timer = setTimeout(() => {
+      void (async () => {
+        const bytes = await measureOutputBytes({
+          file: source.file as File,
+          codec,
+          container,
+          quality,
+          width: requestWidth,
+          frameRate: frameRate === 'source' ? undefined : Number(frameRate),
+          duration,
+          audioBytes,
+          hardware,
+        }).catch(() => null)
+        if (cancelled) return
+        setEstimateBusy(false)
+        if (bytes && bytes > 0) {
+          if (estimateCache.size > 24) estimateCache.clear()
+          estimateCache.set(key, bytes)
+          setSizeEstimate({ bytes, measured: true })
+        }
+      })()
+    }, 650)
+    return () => { cancelled = true; clearTimeout(timer); cancelSizeEstimate() }
+  }, [source, audioOnly, isBusy, rateMode, codec, container, crf, lossless, resolution, frameRate, audioBitrate, videoBitrate, hardware, desktopMode, sizePlan])
+
+  // Bitrate mode is desktop-only: the browser's H.264 encoder ignores bitrate completely.
+  useEffect(() => {
+    if (!desktopMode && rateMode === 'bitrate') setRateMode('crf')
+  }, [desktopMode, rateMode])
+
+  const estimateLine = estimateBusy
+    ? 'Measuring the expected size…'
+    : sizeEstimate
+      ? `≈ ${formatBytes(sizeEstimate.bytes)} expected${sizeEstimate.measured ? ' · measured on three short samples' : ''}`
+      : null
+
   const [outputDir, setOutputDir] = useState('')
   const [browserMode, setBrowserMode] = useState<'file' | 'folder' | null>(null)
 
   const [status, setStatus] = useState('Ready when you are')
   const [progress, setProgress] = useState(0)
-  const [isBusy, setIsBusy] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
   const [elapsed, setElapsed] = useState(0)
   const [isDark, setIsDark] = useState(true)
-  const [desktopMode, setDesktopMode] = useState(false)
   // Which codecs this browser can actually encode with the encoders it exposes, probed
   // once on mount so the panel can explain a missing one before Convert is pressed.
   const [encodableCodecs, setEncodableCodecs] = useState<Partial<Record<CodecId, boolean>>>({})
@@ -1646,7 +1789,7 @@ function App() {
                 : rateMode === 'bitrate' ? `${(Number(videoBitrate) / 1000).toFixed(1)} Mbps` : lossless ? 'Lossless' : `CRF ${crf}`}
               options={[
                 { id: 'crf', label: 'Quality (CRF)' },
-                { id: 'bitrate', label: 'Bitrate' },
+                ...(desktopMode ? [{ id: 'bitrate' as RateMode, label: 'Bitrate' }] : []),
                 { id: 'size', label: 'Target size' },
               ]}
               value={rateMode}
@@ -1693,23 +1836,27 @@ function App() {
                   hint="Mathematically lossless — very large files"
                   disabled={rateMode !== 'crf'}
                 />
+                {estimateLine && <p className="plan-line">{estimateLine}</p>}
               </>
             ) : rateMode === 'bitrate' ? (
-              <label className="field">
-                <span className="field-label">Target bitrate</span>
-                <span className="field-control">
-                  <select value={videoBitrate} onChange={(event) => setVideoBitrate(event.target.value)}>
-                    <option value="1500">1.5 Mbps</option>
-                    <option value="3000">3 Mbps</option>
-                    <option value="5000">5 Mbps</option>
-                    <option value="8000">8 Mbps</option>
-                    <option value="12000">12 Mbps</option>
-                    <option value="20000">20 Mbps</option>
-                    <option value="30000">30 Mbps</option>
-                    <option value="50000">50 Mbps</option>
-                  </select>
-                </span>
-              </label>
+              <>
+                <label className="field">
+                  <span className="field-label">Target bitrate</span>
+                  <span className="field-control">
+                    <select value={videoBitrate} onChange={(event) => setVideoBitrate(event.target.value)}>
+                      <option value="1500">1.5 Mbps</option>
+                      <option value="3000">3 Mbps</option>
+                      <option value="5000">5 Mbps</option>
+                      <option value="8000">8 Mbps</option>
+                      <option value="12000">12 Mbps</option>
+                      <option value="20000">20 Mbps</option>
+                      <option value="30000">30 Mbps</option>
+                      <option value="50000">50 Mbps</option>
+                    </select>
+                  </span>
+                </label>
+                {estimateLine && <p className="plan-line">{estimateLine}</p>}
+              </>
             ) : (
               <>
                 <label className="field">
@@ -1753,7 +1900,7 @@ function App() {
 
           <Segmented<SpeedId>
             label="Encoding effort"
-            hint={speed === 'quality' ? 'Smallest file' : speed === 'fast' ? 'Fastest' : undefined}
+            hint={!desktopMode ? 'desktop app only' : speed === 'quality' ? 'Smallest file' : speed === 'fast' ? 'Fastest' : undefined}
             options={SPEEDS.map((option) => ({ id: option.id, label: option.label, caption: option.caption }))}
             value={speed}
             onChange={setSpeed}
@@ -1789,10 +1936,15 @@ function App() {
           </div>
 
           {!desktopMode && codecUnencodable && (
-            <p className="panel-note warn-note">
+            <p
+              className="panel-note warn-note"
+              title={hevcNeedsHardware && acceleration?.settings
+                ? `Re-enable hardware acceleration in ${acceleration.settings} and restart the browser to get HEVC back.`
+                : undefined}
+            >
               <strong>{CODECS[codec].name}</strong>
               {hevcNeedsHardware && acceleration
-                ? <> needs a hardware encoder, and {acceleration.browser} has none available.</>
+                ? <> needs a hardware encoder, and {acceleration.browser} has none.</>
                 : <> has no encoder available in this browser.</>}{' '}
               {alternative ? (
                 <>
@@ -1806,9 +1958,6 @@ function App() {
                   instead — it still shrinks files well.
                 </>
               ) : null}
-              {hevcNeedsHardware && acceleration?.settings && (
-                <span className="note-tip">{' '}Or re-enable hardware acceleration in {acceleration.settings} and restart the browser.</span>
-              )}
             </p>
           )}
 

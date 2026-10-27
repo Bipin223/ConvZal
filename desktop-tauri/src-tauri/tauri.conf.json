@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ConvZal",
+  "version": "0.1.0",
+  "identifier": "com.bipin.convzal",
+  "build": {
+    "frontendDist": "../../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "ConvZal — Video & MP4 Converter",
+        "width": 1280,
+        "height": 900,
+        "minWidth": 900,
+        "minHeight": 640,
+        "resizable": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "publisher": "Bipin Rizal",
+    "copyright": "Bipin Rizal",
+    "shortDescription": "Shrink videos locally, keep the quality.",
+    "longDescription": "ConvZal converts video and extracts audio entirely on your device. Nothing is uploaded.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

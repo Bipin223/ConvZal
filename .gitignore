@@ -14,6 +14,11 @@ release
 *.local
 desktop/ffmpeg/*.exe
 
+# Tauri shell build output (Rust target dir is multi-GB)
+desktop-tauri/node_modules
+desktop-tauri/src-tauri/target
+desktop-tauri/src-tauri/gen
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

@@ -1,0 +1,13 @@
+{
+  "name": "convzal-tauri",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Tauri shell for the ConvZal web build",
+  "scripts": {
+    "build": "tauri build",
+    "dev": "tauri dev"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.9.0"
+  }
+}

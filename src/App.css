@@ -479,7 +479,6 @@
 }
 .inline-action:hover { background: color-mix(in srgb, var(--accent-bright) 24%, transparent); border-color: var(--accent-bright); }
 .inline-action:focus-visible { outline: 2px solid var(--accent-bright); outline-offset: 2px; }
-.note-tip { display: block; margin-top: 3px; font-size: 10.5px; opacity: .72; }
 
 .field-block {
   display: grid;
