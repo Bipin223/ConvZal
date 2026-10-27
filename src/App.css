@@ -459,18 +459,27 @@
   background: color-mix(in srgb, var(--danger) 8%, transparent);
   color: var(--on-surface);
 }
-.inline-link {
-  margin: 0;
-  padding: 0;
-  border: 0;
-  background: none;
-  font: inherit;
+/* A real pill, not underlined text: the switch-codec action is the one useful thing
+   inside the warning, and it has to be visible as a control (and tappable on a phone). */
+.inline-action {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 1px 9px;
+  margin: 0 2px;
+  border: 1px solid color-mix(in srgb, var(--accent-bright) 55%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent-bright) 14%, transparent);
   color: var(--accent-bright);
-  text-decoration: underline;
-  text-underline-offset: 2px;
+  font: inherit;
+  font-weight: 650;
+  line-height: 1.35;
   cursor: pointer;
+  transition: background .2s var(--ease-move), border-color .2s var(--ease-move);
 }
-.inline-link:hover { color: var(--accent); }
+.inline-action:hover { background: color-mix(in srgb, var(--accent-bright) 24%, transparent); border-color: var(--accent-bright); }
+.inline-action:focus-visible { outline: 2px solid var(--accent-bright); outline-offset: 2px; }
+.note-tip { display: block; margin-top: 3px; font-size: 10.5px; opacity: .72; }
 
 .field-block {
   display: grid;
@@ -517,6 +526,28 @@
 .field select:focus-visible { outline: 0; background-color: var(--press); box-shadow: 0 0 0 3px var(--glow); }
 .field select option { color: #1d1428; background: #fff; }
 .dark-mode .field select option { color: #edeaf4; background: #221a33; }
+
+/* Target-size input: same field look as the selects, without the tiny spinner arrows. */
+.size-input {
+  width: 78px;
+  padding: 6px 8px;
+  border: 1px solid var(--outline);
+  border-radius: 10px;
+  color: var(--on-surface);
+  background: var(--field-bg);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-align: right;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.size-input::-webkit-outer-spin-button,
+.size-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.size-input:hover { background-color: var(--press); }
+.size-input:focus-visible { outline: 0; background-color: var(--press); box-shadow: 0 0 0 3px var(--glow); }
+.size-unit { color: var(--on-surface-variant); font-size: 11.5px; font-weight: 600; }
+.plan-line { margin: 0; color: var(--on-surface-variant); font-size: 10.5px; line-height: 1.45; }
 
 /* ------------------------------------------------------ segmented control */
 .text-segmented { display: flex; flex-direction: column; align-items: stretch; gap: 5px; padding: 7px 0; border-bottom: 1px solid var(--outline); }
@@ -670,9 +701,21 @@
   gap: 8px;
   margin: auto -12px -12px;
   padding: 10px 12px 12px;
-  background: linear-gradient(180deg, transparent, var(--panel) 26%);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  /* Must be opaque: this bar sits on top of scrolled panel content, and the previous
+     transparent-to-panel gradient let the HEVC notice show through the disabled button
+     (40% opacity), which read as the button overlapping the text. The soft edge now
+     comes from ::before, above the bar instead of behind it. */
+  background: var(--panel);
+}
+.action-zone::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -22px;
+  height: 22px;
+  pointer-events: none;
+  background: linear-gradient(180deg, transparent, var(--panel));
 }
 
 .convert-button {
@@ -984,6 +1027,9 @@
   .drop-zone { min-height: 170px; }
   .privacy-pill { display: none; }
   .browser-backdrop { padding: 10px; }
+  /* Thumb-sized targets: the segmented rows measured 23px tall on a phone. */
+  .segment { min-height: 36px; }
+  .inline-action { min-height: 30px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

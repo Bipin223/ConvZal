@@ -22,7 +22,7 @@ import './App.css'
 
 type CodecId = 'hevc' | 'avc' | 'av1' | 'vp9'
 type ContainerId = 'mp4' | 'mkv' | 'mov' | 'webm'
-type RateMode = 'crf' | 'bitrate'
+type RateMode = 'crf' | 'bitrate' | 'size'
 type SpeedId = 'fast' | 'balanced' | 'quality'
 
 type BrowserEntry = {
@@ -209,6 +209,84 @@ function sizeChange(from: number, to: number): string | undefined {
   return ratio < 0 ? `${Math.round(-ratio * 100)}% smaller` : `${Math.round(ratio * 100)}% larger`
 }
 
+// ------------------------------------------------------- target file size
+// "Get this under X MB" is a different question from "pick a quality": the whole-file
+// budget has to be split between audio and video, and the resulting video bitrate then
+// decides how much resolution the picture can actually carry. The estimate leans low
+// (6% headroom, and never more than 85% of the source's own bitrate) so the result lands
+// under the limit instead of just next to it.
+const TARGET_SIZE_PRESETS = [
+  { mb: 10, caption: 'Tiny' },
+  { mb: 20, caption: 'Discord' },
+  { mb: 50, caption: 'Roomier' },
+] as const
+const MIN_VIDEO_BITRATE_KBPS = 64
+// Below roughly this many bits per pixel per frame, a picture turns to mush: step the
+// resolution down until every pixel gets enough bits.
+const TARGET_BITS_PER_PIXEL = 0.035
+
+type SizePlan = {
+  videoBitrateKbps: number
+  width: number
+  height: number
+  frameRate: number
+  estimatedBytes: number
+}
+
+function planTargetSize(input: {
+  duration: number
+  sourceBytes: number
+  sourceWidth: number
+  sourceHeight: number
+  targetMb: number
+  audioBitrateKbps: number
+}): SizePlan | null {
+  const duration = Number.isFinite(input.duration) ? input.duration : 0
+  const targetMb = Number(input.targetMb)
+  if (duration < 0.5 || !(targetMb > 0)) return null
+
+  const targetBytes = targetMb * 1024 * 1024
+  const audioKbps = Math.max(32, Math.min(320, input.audioBitrateKbps || 128))
+  const sourceWidth = Math.max(2, input.sourceWidth || 1920)
+  const sourceHeight = Math.max(2, input.sourceHeight || 1080)
+
+  // 6% is left to the container, the index and the encoder overshooting its target.
+  const budgetBps = (targetBytes * 8 * 0.94) / duration - audioKbps * 1000
+  // Strictly smaller: never plan to spend more than 85% of what the source already costs.
+  const sourceBps = input.sourceBytes > 0
+    ? (input.sourceBytes * 8 * 0.85) / duration - audioKbps * 1000
+    : Number.POSITIVE_INFINITY
+  const videoBps = Math.max(
+    MIN_VIDEO_BITRATE_KBPS * 1000,
+    Math.min(48_000_000, Math.min(budgetBps, sourceBps)),
+  )
+
+  // 30 fps is the cap: doubling the frame rate halves the bits every frame can have.
+  const frameRate = 30
+  const aspect = sourceWidth / sourceHeight
+  const ladder = [2160, 1440, 1080, 720, 480, 360, 240]
+  let height = ladder[ladder.length - 1]
+  for (const candidate of ladder) {
+    if (candidate > sourceHeight) continue
+    const candidateWidth = Math.max(2, Math.round((candidate * aspect) / 2) * 2)
+    if (videoBps / (candidateWidth * candidate * frameRate) >= TARGET_BITS_PER_PIXEL) {
+      height = candidate
+      break
+    }
+  }
+  height = Math.min(height, sourceHeight)
+  const width = Math.max(2, Math.round((height * aspect) / 2) * 2)
+  const videoBitrateKbps = Math.round(videoBps / 1000)
+
+  return {
+    videoBitrateKbps,
+    width,
+    height,
+    frameRate: Math.min(frameRate, 30),
+    estimatedBytes: Math.round(((videoBitrateKbps + audioKbps) * 1000 * duration) / 8),
+  }
+}
+
 function formatDuration(seconds: number) {
   if (!Number.isFinite(seconds) || seconds <= 0) return '—'
   const total = Math.round(seconds)
@@ -282,16 +360,24 @@ function containerDisplayName(container: string) {
   return CONTAINERS[container as ContainerId]?.label ?? container.toUpperCase()
 }
 
-// A local media probe that never touches the disk: the browser decodes the header only.
+// A local media probe that never touches the disk. Reading the header through a <video>
+// element can stall on a very large file with no error and no event, which used to leave the
+// drop screen stuck on "Ready when you are" forever, so the container is parsed directly with
+// Mediabunny and the element is only a fallback - now with a timeout.
 function probeBlob(file: File): Promise<{ duration: number; width: number; height: number; hasAudio?: boolean }> {
-  return new Promise((resolve) => {
+  const viaElement = () => new Promise<{ duration: number; width: number; height: number; hasAudio?: boolean }>((resolve) => {
     const video = document.createElement('video')
     const url = URL.createObjectURL(file)
+    let settled = false
     const done = (duration: number, width: number, height: number, hasAudio?: boolean) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
       video.removeAttribute('src')
       URL.revokeObjectURL(url)
       resolve({ duration, width, height, hasAudio })
     }
+    const timer = setTimeout(() => done(0, 0, 0), 8000)
     video.preload = 'metadata'
     video.onloadedmetadata = () => {
       const element = video as HTMLVideoElement & { mozHasAudio?: boolean; audioTracks?: { length: number } }
@@ -306,6 +392,20 @@ function probeBlob(file: File): Promise<{ duration: number; width: number; heigh
     video.onerror = () => done(0, 0, 0)
     video.src = url
   })
+
+  return (async () => {
+    try {
+      const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
+      const [track, audio] = await Promise.all([input.getPrimaryVideoTrack(), input.getPrimaryAudioTrack()])
+      const duration = await input.getDurationFromMetadata().catch(() => null)
+      const width = track ? await track.getDisplayWidth().catch(() => 0) : 0
+      const height = track ? await track.getDisplayHeight().catch(() => 0) : 0
+      if (track && duration && duration > 0 && width > 0 && height > 0) {
+        return { duration, width, height, hasAudio: Boolean(audio) }
+      }
+    } catch { /* fall through to the element probe */ }
+    return viaElement()
+  })()
 }
 
 /* ------------------------------------------------------- output check */
@@ -700,12 +800,26 @@ function App() {
   const [lossless, setLossless] = useState(false)
   const [crf, setCrf] = useState(23)
   const [videoBitrate, setVideoBitrate] = useState('8000')
+  const [targetSizeMb, setTargetSizeMb] = useState('20')
   const [resolution, setResolution] = useState('source')
   const [frameRate, setFrameRate] = useState('source')
   const [audioBitrate, setAudioBitrate] = useState('192')
   const [speed, setSpeed] = useState<SpeedId>('balanced')
   const [hardware, setHardware] = useState(false)
   const [audioOnly, setAudioOnly] = useState(false)
+
+  // What a whole-file budget works out to for the clip that is actually loaded: the
+  // bitrate comes from the budget, and the resolution is whatever that bitrate can carry.
+  const sizePlan = useMemo(() => (rateMode === 'size' && source
+    ? planTargetSize({
+        duration: source.duration,
+        sourceBytes: source.size,
+        sourceWidth: source.width,
+        sourceHeight: source.height,
+        targetMb: Number(targetSizeMb),
+        audioBitrateKbps: Number(audioBitrate),
+      })
+    : null), [rateMode, source, targetSizeMb, audioBitrate])
 
   const [outputDir, setOutputDir] = useState('')
   const [browserMode, setBrowserMode] = useState<'file' | 'folder' | null>(null)
@@ -977,19 +1091,45 @@ function App() {
   const runBrowserConversion = useCallback(async (): Promise<ConvertResult> => {
     const file = source?.file
     if (!file) throw new Error('this file cannot be read in the browser')
-    const targetWidth = resolution === 'source' ? undefined : Number(resolution)
-    const targetFrameRate = frameRate === 'source' ? undefined : Number(frameRate)
-    // The encoder is configured with the real output size, so the capability probe uses it
-    // too: an encoder can accept one size and refuse another.
     const sourceWidth = source?.width || 1920
     const sourceHeight = source?.height || 1080
-    const outputWidth = targetWidth ?? sourceWidth
-    const outputHeight = Math.max(2, Math.round((outputWidth * sourceHeight) / sourceWidth))
-    const encodingQuality = rateMode === 'bitrate'
-      ? new Quality({ bitrate: Number(videoBitrate) * 1000, bitrateMode: 'variable' })
-      : lossless
-        ? new Quality({ quantizer: 0 })
-        : crfQuality(codec, outputWidth, outputHeight, crf)
+
+    // A size budget becomes a concrete bitrate and resolution here; every other mode
+    // passes the user's own settings through untouched.
+    const plan = rateMode === 'size'
+      ? planTargetSize({
+          duration: source?.duration ?? 0,
+          sourceBytes: source?.size ?? 0,
+          sourceWidth,
+          sourceHeight,
+          targetMb: Number(targetSizeMb),
+          audioBitrateKbps: Number(audioBitrate),
+        })
+      : null
+    if (rateMode === 'size' && !plan) {
+      throw new Error('This file does not report a duration, so a size budget cannot be planned — pick Bitrate instead')
+    }
+    const planMode = Boolean(plan)
+    // Budget for the whole file, and never more than 85% of the source: the point is to
+    // shrink it, even when the user asks for a size larger than the file already is.
+    const budgetBytes = plan
+      ? Math.min(Math.max(1, Number(targetSizeMb)) * 1024 * 1024, (source?.size || Number.POSITIVE_INFINITY) * 0.85)
+      : 0
+    const audioBytes = ((Number(audioBitrate) || 0) * 1000 * (source?.duration ?? 0)) / 8
+    const userWidth = resolution === 'source' ? undefined : Number(resolution)
+    const userFrameRate = frameRate === 'source' ? undefined : Number(frameRate)
+    const clampWidth = (value: number) => Math.max(320, Math.min(sourceWidth, Math.round(value / 2) * 2))
+    const qualityFor = (videoBitrateKbps: number, width: number) => (
+      planMode
+        // The bitrate is only a hint in a browser (see the note below), but it still has to
+        // be a number the encoder accepts; the real size control is the pixel count.
+        ? new Quality({ bitrate: Math.max(64, videoBitrateKbps) * 1000, bitrateMode: 'constant' })
+        : rateMode === 'bitrate'
+          ? new Quality({ bitrate: Number(videoBitrate) * 1000, bitrateMode: 'variable' })
+          : lossless
+            ? new Quality({ quantizer: 0 })
+            : crfQuality(codec, width, Math.max(2, Math.round((width * sourceHeight) / sourceWidth)), crf)
+    )
 
     // Audio-only always goes through FFmpeg WASM: its AAC encoder is quick and dependable
     // and no video encoding is involved.
@@ -1025,51 +1165,125 @@ function App() {
     // WebAssembly fallback - the bundled core's x264/x265 is noasm and single-threaded and
     // cannot finish a real clip (see the note above \`buildWasmAudioArgs\`). Trying it is
     // what made the app look frozen at 0% forever.
-    const probeOptions: { width?: number; height?: number; frameRate?: number; quality?: Quality } = {
-      quality: encodingQuality,
-      width: outputWidth,
-      height: outputHeight,
-    }
-    if (targetFrameRate) probeOptions.frameRate = targetFrameRate
-    const supported = await canEncodeVideo(codec, probeOptions).catch(() => false)
-    if (!supported) {
+    //
+    // Size mode is a different kind of encoding: Chromium's WebCodecs H.264 encoder ignores
+    // `bitrate` outright (measured: asking for 500 kbps and 1500 kbps produced the same
+    // ~54 Mbps), so the only lever that really moves the file size is the pixel count. The
+    // plan gives a first guess, a six-second probe measures how this clip actually encodes,
+    // and the full pass is then scaled to the budget. A reminder pass corrects the estimate
+    // if the clip's later scenes compress differently.
+    const encodeVideo = async (options: { width?: number; frameRate?: number; trimStart?: number; trimEnd?: number; discardAudio?: boolean } = {}) => {
+      const width = options.width ?? (plan ? plan.width : userWidth)
+      const fps = options.frameRate ?? (plan ? plan.frameRate : userFrameRate)
+      const quality = qualityFor(plan ? plan.videoBitrateKbps : Number(videoBitrate), width ?? sourceWidth)
+
+      // Deliberately no canEncodeVideo() pre-flight: Mediabunny memoises that answer for the
+      // lifetime of the page, so a single transient false - which Edge does produce for a
+      // moment after a previous encoder is released - would disable the codec until reload.
+      // Configuring the encoder is the real check, and a failed attempt is retried.
+      const attempt = async () => {
+        const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
+        const output = new Output({ format: createOutputFormat(container), target: new BufferTarget() })
+        const conversion = await Conversion.init({
+          input,
+          output,
+          tracks: 'all',
+          ...(options.trimEnd
+            ? { trim: { start: options.trimStart ?? 0, end: (options.trimStart ?? 0) + options.trimEnd } }
+            : {}),
+          ...(options.discardAudio ? { audio: { discard: true } } : {}),
+          video: {
+            codec,
+            quality,
+            forceTranscode: true,
+            width,
+            frameRate: fps,
+            keyFrameInterval: 2,
+            hardwareAcceleration: hardware ? 'prefer-hardware' : 'no-preference',
+          },
+          showWarnings: false,
+        })
+        if (!conversion.isValid) {
+          throw new Error(`this browser has no ${CODECS[codec].name} encoder available for these settings`)
+        }
+        browserJobRef.current = conversion
+        conversion.onProgress = (value) => {
+          setProgress(Math.max(0, Math.min(100, Math.round(value * 100))))
+        }
+        try {
+          await conversion.execute()
+        } finally {
+          browserJobRef.current = null
+        }
+        if (!output.target.buffer) throw new Error('the encoder returned an empty file')
+        return new Blob([output.target.buffer], { type: CONTAINERS[container].mimeType })
+      }
+
+      for (const delay of [0, 700, 2000]) {
+        if (delay) await new Promise((resolve) => setTimeout(resolve, delay))
+        try {
+          return await attempt()
+        } catch (error) {
+          const message = String((error as Error)?.message ?? error)
+          // Only an unavailable encoder is worth retrying; a decode failure will just fail again.
+          if (!/encoder|not supported|notsupported/i.test(message)) throw error
+        }
+      }
+
       const hint = accelerationHint()
       const swap = alternative ? `switch to ${CODECS[alternative].name}` : 'switch codec'
       throw new Error(codec === 'hevc' && hasHardwareEncoder === false
         ? `H.265 needs a hardware video encoder and ${hint.browser} has none — turn on hardware acceleration${hint.settings ? ` (${hint.settings})` : ''} and restart, ${swap}, or convert with the desktop app`
-        : `${hint.browser} has no ${CODECS[codec].name} video encoder for these settings — ${swap}, or convert with the desktop app`)
+        : `${hint.browser} could not start its ${CODECS[codec].name} encoder — ${swap}, or convert with the desktop app`)
     }
 
-    setStatus(`Encoding ${CODECS[codec].name} with the device encoder…`)
-    const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
-    const output = new Output({ format: createOutputFormat(container), target: new BufferTarget() })
-    const conversion = await Conversion.init({
-      input,
-      output,
-      tracks: 'all',
-      video: {
-        codec,
-        quality: encodingQuality,
-        forceTranscode: true,
-        width: targetWidth,
-        frameRate: targetFrameRate,
-        keyFrameInterval: 2,
-        hardwareAcceleration: hardware ? 'prefer-hardware' : 'no-preference',
-      },
-      showWarnings: false,
-    })
-    if (!conversion.isValid) throw new Error('no browser-decodable video track in this file')
-    browserJobRef.current = conversion
-    conversion.onProgress = (value) => {
-      setProgress(Math.max(0, Math.min(100, Math.round(value * 100))))
+    let produced: Blob
+    if (plan) {
+      const duration = Math.max(1, source?.duration ?? 1)
+      const framesPerSecond = plan.frameRate
+      const videoBudget = Math.max(64_000, budgetBytes * 0.94 - audioBytes)
+
+      // Six seconds is long enough to see how this content compresses and short enough to
+      // be nearly free next to the real pass. Sample the middle, not the opening: an intro
+      // card or a fade-in compresses to almost nothing and would overestimate the budget.
+      const probeSeconds = Math.min(6, duration)
+      const probeStart = Math.max(0, duration / 2 - probeSeconds / 2)
+      setStatus('Measuring how this clip compresses…')
+      setProgress(0)
+      const probeWidth = clampWidth(plan.width)
+      const probe = await encodeVideo({ width: probeWidth, frameRate: framesPerSecond, trimStart: probeStart, trimEnd: probeSeconds, discardAudio: true })
+      const probeHeight = Math.max(2, Math.round((probeWidth * sourceHeight) / sourceWidth))
+      const bytesPerPixelFrame = probe.size / (probeWidth * probeHeight * probeSeconds * framesPerSecond)
+
+      // size ≈ bpp x pixels x frames, so solve for the pixels that fit the video budget.
+      // 0.92 on the width (≈15% on size) covers scenes that compress worse than the sample.
+      const wantPixels = videoBudget / (bytesPerPixelFrame * duration * framesPerSecond)
+      let currentWidth = clampWidth(Math.min(
+        plan.width,
+        Math.sqrt(wantPixels * (sourceWidth / sourceHeight)) * 0.92,
+      ))
+
+      setStatus(`Encoding ${CODECS[codec].name} at ${currentWidth}px to fit ${targetSizeMb} MB…`)
+      setProgress(0)
+      produced = await encodeVideo({ width: currentWidth, frameRate: framesPerSecond })
+
+      // Correction passes scale from the width that actually produced this result, not from
+      // the original estimate - otherwise a second correction can grow the file again.
+      for (let attempt = 0; attempt < 2 && produced.size > budgetBytes && !cancelRequestedRef.current; attempt += 1) {
+        const nextWidth = clampWidth(currentWidth * Math.sqrt(budgetBytes / produced.size) * 0.97)
+        if (nextWidth >= currentWidth) break
+        currentWidth = nextWidth
+        setStatus(`Came out at ${formatBytes(produced.size)} — re-encoding at ${currentWidth}px to fit ${targetSizeMb} MB…`)
+        setProgress(0)
+        const smaller = await encodeVideo({ width: currentWidth, frameRate: framesPerSecond })
+        if (smaller.size >= produced.size) break
+        produced = smaller
+      }
+    } else {
+      setStatus(`Encoding ${CODECS[codec].name} with the device encoder…`)
+      produced = await encodeVideo()
     }
-    try {
-      await conversion.execute()
-    } finally {
-      browserJobRef.current = null
-    }
-    if (!output.target.buffer) throw new Error('the encoder returned an empty file')
-    const produced = new Blob([output.target.buffer], { type: CONTAINERS[container].mimeType })
+
     assertConverted(await inspectMedia(produced), {
       codec,
       audioOnly: false,
@@ -1077,7 +1291,7 @@ function App() {
       label: 'The device encoder',
     })
     return finalizeBrowser(produced, videoOutput(codec, container))
-  }, [source, resolution, frameRate, rateMode, videoBitrate, lossless, crf, codec, container, hardware, audioBitrate, audioOnly, finalizeBrowser, hasHardwareEncoder, alternative])
+  }, [source, resolution, frameRate, rateMode, videoBitrate, targetSizeMb, lossless, crf, codec, container, hardware, audioBitrate, audioOnly, finalizeBrowser, hasHardwareEncoder, alternative])
 
   const convert = useCallback(async () => {
     if (!source || isBusy) return
@@ -1101,6 +1315,21 @@ function App() {
           setProgress(Math.round(ratio * 100))
         })
         try {
+          // The desktop engine takes a plain bitrate, so the same budget math applies:
+          // it gets the planned bitrate, width and frame rate instead of the mode name.
+          const nativePlan = rateMode === 'size'
+            ? planTargetSize({
+                duration: source.duration,
+                sourceBytes: source.size,
+                sourceWidth: source.width,
+                sourceHeight: source.height,
+                targetMb: Number(targetSizeMb),
+                audioBitrateKbps: Number(audioBitrate),
+              })
+            : null
+          if (rateMode === 'size' && !nativePlan) {
+            throw new Error('This file does not report a duration, so a size budget cannot be planned — pick Bitrate instead')
+          }
           const nativeResult = await api.convertVideo({
             requestId,
             inputPath: source.path,
@@ -1108,12 +1337,12 @@ function App() {
             container,
             audioOnly,
             mode: rateMode === 'crf' && lossless ? 'lossless' : 'crf',
-            rateControl: rateMode,
+            rateControl: nativePlan ? 'bitrate' : rateMode,
             crf,
-            videoBitrate: Number(videoBitrate),
+            videoBitrate: nativePlan ? nativePlan.videoBitrateKbps : Number(videoBitrate),
             audioBitrate: Number(audioBitrate),
-            resolution,
-            frameRate,
+            resolution: nativePlan ? String(nativePlan.width) : resolution,
+            frameRate: nativePlan ? String(nativePlan.frameRate) : frameRate,
             speed,
             hardware: audioOnly ? false : hardware,
             outputDir: outputDir || undefined,
@@ -1150,7 +1379,7 @@ function App() {
       setIsBusy(false)
       requestIdRef.current = ''
     }
-  }, [source, isBusy, codec, container, audioOnly, rateMode, lossless, crf, videoBitrate, audioBitrate, resolution, frameRate, speed, hardware, outputDir, runBrowserConversion])
+  }, [source, isBusy, codec, container, audioOnly, rateMode, lossless, crf, videoBitrate, targetSizeMb, audioBitrate, resolution, frameRate, speed, hardware, outputDir, runBrowserConversion])
 
   const cancel = useCallback(async () => {
     const id = requestIdRef.current
@@ -1412,10 +1641,13 @@ function App() {
           <div className="field-block">
             <Segmented<RateMode>
               label="Rate control"
-              hint={rateMode === 'bitrate' ? `${(Number(videoBitrate) / 1000).toFixed(1)} Mbps` : lossless ? 'Lossless' : `CRF ${crf}`}
+              hint={rateMode === 'size'
+                ? (sizePlan ? `under ${targetSizeMb} MB` : 'whole-file budget')
+                : rateMode === 'bitrate' ? `${(Number(videoBitrate) / 1000).toFixed(1)} Mbps` : lossless ? 'Lossless' : `CRF ${crf}`}
               options={[
                 { id: 'crf', label: 'Quality (CRF)' },
                 { id: 'bitrate', label: 'Bitrate' },
+                { id: 'size', label: 'Target size' },
               ]}
               value={rateMode}
               onChange={setRateMode}
@@ -1462,7 +1694,7 @@ function App() {
                   disabled={rateMode !== 'crf'}
                 />
               </>
-            ) : (
+            ) : rateMode === 'bitrate' ? (
               <label className="field">
                 <span className="field-label">Target bitrate</span>
                 <span className="field-control">
@@ -1478,6 +1710,44 @@ function App() {
                   </select>
                 </span>
               </label>
+            ) : (
+              <>
+                <label className="field">
+                  <span className="field-label">Target file size</span>
+                  <span className="field-control">
+                    <input
+                      className="size-input"
+                      type="number"
+                      min={1}
+                      max={2048}
+                      step={1}
+                      inputMode="numeric"
+                      value={targetSizeMb}
+                      onChange={(event) => setTargetSizeMb(event.target.value)}
+                      aria-label="Target file size in megabytes"
+                    />
+                    <span className="size-unit">MB</span>
+                  </span>
+                </label>
+                <div className="chip-row">
+                  {TARGET_SIZE_PRESETS.map((preset) => (
+                    <button
+                      type="button"
+                      key={preset.mb}
+                      className={`chip ${Number(targetSizeMb) === preset.mb ? 'active' : ''}`}
+                      onClick={() => setTargetSizeMb(String(preset.mb))}
+                    >
+                      {preset.mb} MB
+                      <small>{preset.caption}</small>
+                    </button>
+                  ))}
+                </div>
+                <p className="plan-line">
+                  {sizePlan
+                    ? `≈ ${(sizePlan.videoBitrateKbps / 1000).toFixed(2)} Mbps video · ${sizePlan.height}p ${sizePlan.frameRate} fps · fits in ${formatBytes(sizePlan.estimatedBytes)}`
+                    : 'Load a video first — its duration sets the bitrate that fits the budget.'}
+                </p>
+              </>
             )}
           </div>
 
@@ -1520,32 +1790,25 @@ function App() {
 
           {!desktopMode && codecUnencodable && (
             <p className="panel-note warn-note">
-              {hevcNeedsHardware && acceleration ? (
-                <>
-                  <strong>HEVC</strong> is encoded in hardware only, and {acceleration.browser} has no hardware video
-                  encoder available right now. That is normally hardware acceleration being switched off, or an
-                  out-of-date GPU driver — turning acceleration back on
-                  {acceleration.settings ? <> in <strong>{acceleration.settings}</strong></> : null} and restarting the
-                  browser brings H.265 back.
-                </>
-              ) : (
-                <>This browser has no <strong>{CODECS[codec].name}</strong> encoder available right now.</>
-              )}{' '}
+              <strong>{CODECS[codec].name}</strong>
+              {hevcNeedsHardware && acceleration
+                ? <> needs a hardware encoder, and {acceleration.browser} has none available.</>
+                : <> has no encoder available in this browser.</>}{' '}
               {alternative ? (
                 <>
                   <button
                     type="button"
-                    className="inline-link"
+                    className="inline-action"
                     onClick={() => { setCodec(alternative); setContainer((current) => containerForCodec(alternative, current)) }}
                   >
-                    Switch to {CODECS[alternative].name}
-                  </button>
-                  {alternative === 'avc'
-                    ? ' — in a browser this is the codec that actually shrinks files, most of all with “Smallest” selected.'
-                    : ' — it encodes here, on this computer.'}{' '}
+                    Use {CODECS[alternative].name}
+                  </button>{' '}
+                  instead — it still shrinks files well.
                 </>
               ) : null}
-              For {CODECS[codec].name} on any machine, the <strong>desktop app</strong> uses native FFmpeg.
+              {hevcNeedsHardware && acceleration?.settings && (
+                <span className="note-tip">{' '}Or re-enable hardware acceleration in {acceleration.settings} and restart the browser.</span>
+              )}
             </p>
           )}
 
