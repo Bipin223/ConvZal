@@ -103,6 +103,40 @@ The installer is created at `release/ConvZal-0.0.0-Setup.exe`, and `release/win-
 
 The default Vite base is **relative** (`./`) so `dist/index.html` loads over `file://` inside the packaged app — an absolute `/assets/...` URL points at the drive root there and the window comes up blank. The Pages workflow sets an absolute `VITE_BASE_PATH` for the site, which is what a subfolder deployment needs.
 
+### Tauri build (2 MB installer)
+
+`desktop-tauri/` is a second Windows shell around the same built web app. It has no bundled
+FFmpeg: encoding uses the machine's WebCodecs encoders, so it is H.264/AV1/VP9 and H.265 only
+where the GPU exposes an HEVC encoder. It is the small download; the Electron build is the one
+with the native FFmpeg engine and phone sharing.
+
+```powershell
+npm run build
+cd desktop-tauri
+npm install
+npx tauri build
+```
+
+The exe lands at `desktop-tauri/src-tauri/target/release/convzal.exe` and the NSIS installer at
+`desktop-tauri/src-tauri/target/release/bundle/nsis/ConvZal_0.1.0_x64-setup.exe` (~2.1 MB,
+8.8 MB installed). Building needs Rust (MSVC toolchain) and the Visual Studio C++ build tools;
+WebView2 is already present on Windows 10/11.
+
+### Target size and the expected-size estimate
+
+**Target size** turns a whole-file budget into a bitrate and, because the browser encoder
+ignores bitrate (measured: 500 kbps and 1500 kbps both produced ~54 Mbps), into a pixel count.
+It measures a six-second sample, encodes at the width that should fit, re-encodes smaller when
+the result overshoots, and never plans above 85% of the source size. Measured: 408.7 MB →
+19.98 MB (45 s), 299.9 MB → 19.93 MB (59 s), 299.9 MB → 9.92 MB (68 s), all real H.264 files.
+
+In **Quality (CRF)** mode the panel shows an expected size measured from a short mid-clip
+sample: 113.3 MB predicted against 111.4 MB actual on an 84-second 1080p60 clip (1.7% off).
+The measurement is skipped in the Tauri shell because WebView2 stalls on a trimmed conversion;
+Target size shows its budget in both builds. **Bitrate** mode is hidden in the browser/Tauri
+build for the same reason — the number would not do anything there.
+
+
 ## From your phone (desktop app)
 
 The desktop app can hand its engine to the rest of the Wi-Fi. Switch on **Use it from your phone** in the source pane, scan the QR code with the phone (or type the address), pick a video on the phone and convert: the phone uploads over the local network, this PC encodes with the same native FFmpeg pipeline, and the phone downloads the result.

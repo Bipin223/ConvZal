@@ -313,11 +313,15 @@ async function measureOutputBytes(options: {
 }): Promise<number | null> {
   const { file, codec, container, quality, width, frameRate, duration } = options
   if (!(duration > 2)) return null
-  const sampleSeconds = Math.min(3, Math.max(1, duration / 8))
-  const starts = [0.12, 0.5, 0.88].map((fraction) => Math.max(0, Math.min(duration - sampleSeconds, duration * fraction)))
+  // One sample from the middle of the clip. Three samples were more accurate in a browser but
+  // WebView2 stalls when a second trimmed conversion starts in the same page, and a stuck
+  // "measuring" line is worse than a few percent of error. The 15s deadline guarantees the
+  // panel never waits on this.
+  const sampleSeconds = Math.min(4, Math.max(1, duration / 8))
+  const start = Math.max(0, Math.min(duration - sampleSeconds, duration * 0.5))
   let bytes = 0
   let seconds = 0
-  for (const start of starts) {
+  {
     const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
     const output = new Output({ format: createOutputFormat(container), target: new BufferTarget() })
     const conversion = await Conversion.init({
@@ -339,10 +343,17 @@ async function measureOutputBytes(options: {
     })
     if (!conversion.isValid) return null
     estimateJob = conversion
+    let timer: ReturnType<typeof setTimeout> | undefined
     try {
-      await conversion.execute()
+      await Promise.race([
+        conversion.execute(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('estimate timed out')), 15000)
+        }),
+      ])
     } finally {
-      estimateJob = null
+      if (timer) clearTimeout(timer)
+      cancelSizeEstimate()
     }
     bytes += output.target.buffer?.byteLength ?? 0
     seconds += sampleSeconds
@@ -916,6 +927,10 @@ function App() {
     }
     // CRF in the desktop build is encoded by FFmpeg, which this measurement cannot sample.
     if (desktopMode || !source.file) return
+    // WebView2 (the Tauri shell) stalls inside Conversion.init for this trimmed probe, so the
+    // estimate is skipped there rather than leaving "measuring" on screen. Target size, which
+    // is what a hard limit needs, shows its budget in both builds.
+    if (typeof window !== 'undefined' && (window as { __TAURI__?: unknown }).__TAURI__) return
 
     const requestWidth = resolution === 'source' ? undefined : Number(resolution)
     const outputWidth = requestWidth ?? (source.width || 1920)
@@ -932,17 +947,22 @@ function App() {
     setEstimateBusy(true)
     const timer = setTimeout(() => {
       void (async () => {
-        const bytes = await measureOutputBytes({
-          file: source.file as File,
-          codec,
-          container,
-          quality,
-          width: requestWidth,
-          frameRate: frameRate === 'source' ? undefined : Number(frameRate),
-          duration,
-          audioBytes,
-          hardware,
-        }).catch(() => null)
+        // The whole measurement is bounded, not just execute(): a stalled Conversion.init in
+        // some webviews never reaches the inner timeout.
+        const bytes = await Promise.race([
+          measureOutputBytes({
+            file: source.file as File,
+            codec,
+            container,
+            quality,
+            width: requestWidth,
+            frameRate: frameRate === 'source' ? undefined : Number(frameRate),
+            duration,
+            audioBytes,
+            hardware,
+          }).catch(() => null),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 18000)),
+        ])
         if (cancelled) return
         setEstimateBusy(false)
         if (bytes && bytes > 0) {
@@ -963,7 +983,7 @@ function App() {
   const estimateLine = estimateBusy
     ? 'Measuring the expected size…'
     : sizeEstimate
-      ? `≈ ${formatBytes(sizeEstimate.bytes)} expected${sizeEstimate.measured ? ' · measured on three short samples' : ''}`
+      ? `≈ ${formatBytes(sizeEstimate.bytes)} expected${sizeEstimate.measured ? ' · measured on a short sample' : ''}`
       : null
 
   const [outputDir, setOutputDir] = useState('')
