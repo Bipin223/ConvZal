@@ -10,9 +10,7 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
-release
 *.local
-desktop/ffmpeg/*.exe
 
 # Tauri shell build output (Rust target dir is multi-GB)
 desktop-tauri/node_modules

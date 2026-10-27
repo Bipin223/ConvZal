@@ -417,7 +417,7 @@
 .settings-panel {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
   min-height: 0;
   padding: 12px;
@@ -482,8 +482,8 @@
 
 .field-block {
   display: grid;
-  gap: 7px;
-  padding: 8px 0;
+  gap: 6px;
+  padding: 6px 0;
   border-bottom: 1px solid var(--outline);
 }
 
@@ -549,7 +549,7 @@
 .plan-line { margin: 0; color: var(--on-surface-variant); font-size: 10.5px; line-height: 1.45; }
 
 /* ------------------------------------------------------ segmented control */
-.text-segmented { display: flex; flex-direction: column; align-items: stretch; gap: 5px; padding: 7px 0; border-bottom: 1px solid var(--outline); }
+.text-segmented { display: flex; flex-direction: column; align-items: stretch; gap: 5px; padding: 5px 0; border-bottom: 1px solid var(--outline); }
 .segment-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
 .field-hint { color: var(--accent-bright); font-size: 10.5px; font-weight: 600; }
 
@@ -699,7 +699,7 @@
   flex-direction: column;
   gap: 8px;
   margin: auto -12px -12px;
-  padding: 10px 12px 12px;
+  padding: 8px 12px 10px;
   /* Must be opaque: this bar sits on top of scrolled panel content, and the previous
      transparent-to-panel gradient let the HEVC notice show through the disabled button
      (40% opacity), which read as the button overlapping the text. The soft edge now

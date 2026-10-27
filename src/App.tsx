@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { FFmpeg } from '@ffmpeg/ffmpeg'
 import { fetchFile, toBlobURL } from '@ffmpeg/util'
+import { SPRING, useSpring } from './motion'
 import {
   ALL_FORMATS,
   BlobSource,
@@ -597,6 +598,9 @@ function Segmented<T extends string>({ label, hint, options, value, onChange, se
 }) {
   const activeIndex = Math.max(0, options.findIndex((option) => option.id === value))
   const hasCaptions = options.some((option) => option.caption)
+  // The pill is positioned by a real spring, not a CSS transition: tapping another segment
+  // mid-flight retargets with the current velocity instead of restarting the movement.
+  const slide = useSpring(activeIndex, SPRING.snappy)
   return (
     <div className="text-segmented">
       <div className="segment-heading">
@@ -620,7 +624,10 @@ function Segmented<T extends string>({ label, hint, options, value, onChange, se
         {sliding && (
           <span
             className="segment-slider"
-            style={{ '--seg-count': options.length, '--seg-index': activeIndex } as CSSProperties}
+            style={{
+              '--seg-count': options.length,
+              transform: `translateX(${slide * 100}%)`,
+            } as CSSProperties}
             aria-hidden="true"
           />
         )}

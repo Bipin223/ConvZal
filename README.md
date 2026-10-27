@@ -1,20 +1,17 @@
 # ConvZal
 
-ConvZal converts video and extracts audio entirely on your own device. The browser version uses WebCodecs, Mediabunny, and a local FFmpeg core for audio; the Windows desktop version bundles a native FFmpeg sidecar for reliable encoding without browser codec restrictions, and can hand that same engine to a phone on the local Wi-Fi. Video can be encoded as H.265/HEVC, H.264/AVC, AV1, or VP9 and muxed into an MP4, MKV, MOV, or WebM container, and audio can be extracted to an **M4A** (AAC). Files are processed locally and are not uploaded.
+ConvZal converts video and extracts audio entirely on your own device. The web build uses WebCodecs, Mediabunny, and a local FFmpeg core for audio; the Windows build wraps the same app in a Tauri shell (no bundled FFmpeg, so it uses the machine's own encoders). Video can be encoded as H.265/HEVC, H.264/AVC, AV1, or VP9 and muxed into an MP4, MKV, MOV, or WebM container, and audio can be extracted to an **M4A** (AAC). Files are processed locally and are not uploaded.
 
 **Live:** <https://bipin223.github.io/ConvZal/> — the browser version, nothing to install. Every push to `main` builds and deploys it through `.github/workflows/deploy.yml`.
 
 ## Controls
 
 - **What to keep** — *Video* keeps picture and sound; *Audio only (M4A)* drops the video and writes the soundtrack as AAC in an `.m4a` (plays on phones, cars and editors).
-- **Rate control** — either a CRF quality slider (0–51, where a higher number means a smaller file) or a target bitrate. Quick chips set the usual CRF 32 / 23 / 18 points.
+- **Rate control** — a CRF quality slider (0–51, where a higher number means a smaller file), a whole-file **Target size** budget (10/20/50 MB presets), or — in the desktop build — a fixed bitrate. Quick chips set the usual CRF 32 / 23 / 18 points.
 - **Lossless** — a switch that encodes bit-exactly (H.265 `lossless=1`, H.264 `-qp 0`, VP9/AV1 lossless). Files are very large; it is off by default.
-- **Encoding effort** — Fast / Balanced / Thorough maps onto each encoder's own preset (`libx265` `faster`→`slow`, SVT-AV1 10→6, and so on), which is the single biggest speed lever.
-- **Use the GPU** - on the desktop build, attempts NVENC / QuickSync / AMF first and silently falls back to the CPU encoder when no GPU answers. Never used for lossless.
-- **Use it from your phone** - desktop only: serves this converter to the local Wi-Fi so a phone can send a video and download the converted file. See *From your phone* below.
-- **Save to** — the built-in folder browser (with breadcrumbs, an Up button, drive list and shortcuts) or the Windows folder dialog chooses the output location. The desktop result card adds **Show in folder**, **Play**, and **Save a copy**.
-
-Two long-standing freeze causes are handled explicitly: the decoder `-progress` pipe is always drained (an unread pipe used to deadlock FFmpeg), and the first *real* video stream is mapped with `0:V:0` so a cover-art / attached-picture track can no longer produce a one-frame file.
+- **Encoding effort** — Fast / Balanced / Thorough maps onto each encoder's own preset. WebCodecs exposes no such knob, so the control only does something in the desktop build and says so.
+- **Use the GPU** — asks WebCodecs for a hardware encoder first and falls back to software when the device has none. Never used for lossless.
+- **Save to** — the folder picker chooses the output location where the browser supports it; otherwise the result is downloaded.
 
 ## Phones and playback
 
@@ -90,25 +87,11 @@ The interface is deliberately built to fit on a single screen. The shell is a vi
 
 The source pane holds the drop zone and the destination row; the settings pane holds rate control, effort, GPU, codec/container, resolution/framerate and audio. Below 800px wide the card stacks into one column; below 620px the built-in file browser moves its shortcuts above the list.
 
-## Windows desktop build
+## Windows build (Tauri)
 
-The Electron desktop build uses the native FFmpeg executable installed on the machine and packages it into the installer.
-
-```powershell
-npm run desktop:dev
-npm run desktop:package
-```
-
-The installer is created at `release/ConvZal-0.0.0-Setup.exe`, and `release/win-unpacked/ConvZal.exe` is the same build without the installer around it - handy for a quick run. electron-builder writes to `release/` on purpose: `dist/` belongs to Vite, and `npm run build` empties it, which used to delete an installer sitting there. The generated `desktop/ffmpeg/ffmpeg.exe` file is ignored by Git because it is a large build artifact; run `npm run prepare:ffmpeg` again on another Windows build machine.
-
-The default Vite base is **relative** (`./`) so `dist/index.html` loads over `file://` inside the packaged app — an absolute `/assets/...` URL points at the drive root there and the window comes up blank. The Pages workflow sets an absolute `VITE_BASE_PATH` for the site, which is what a subfolder deployment needs.
-
-### Tauri build (2 MB installer)
-
-`desktop-tauri/` is a second Windows shell around the same built web app. It has no bundled
-FFmpeg: encoding uses the machine's WebCodecs encoders, so it is H.264/AV1/VP9 and H.265 only
-where the GPU exposes an HEVC encoder. It is the small download; the Electron build is the one
-with the native FFmpeg engine and phone sharing.
+`desktop-tauri/` wraps the same built web app in a Tauri 2 shell. It has no bundled FFmpeg:
+encoding uses the machine's WebCodecs encoders, so it does H.264/AV1/VP9 everywhere and H.265
+only where the GPU exposes an HEVC encoder.
 
 ```powershell
 npm run build
@@ -121,6 +104,10 @@ The exe lands at `desktop-tauri/src-tauri/target/release/convzal.exe` and the NS
 `desktop-tauri/src-tauri/target/release/bundle/nsis/ConvZal_0.1.0_x64-setup.exe` (~2.1 MB,
 8.8 MB installed). Building needs Rust (MSVC toolchain) and the Visual Studio C++ build tools;
 WebView2 is already present on Windows 10/11.
+
+The default Vite base is **relative** (`./`) so `dist/index.html` loads from the app's own
+asset scheme; the Pages workflow sets an absolute `VITE_BASE_PATH` for the site, which is what
+a subfolder deployment needs.
 
 ### Target size and the expected-size estimate
 
@@ -137,19 +124,8 @@ Target size shows its budget in both builds. **Bitrate** mode is hidden in the b
 build for the same reason — the number would not do anything there.
 
 
-## From your phone (desktop app)
-
-The desktop app can hand its engine to the rest of the Wi-Fi. Switch on **Use it from your phone** in the source pane, scan the QR code with the phone (or type the address), pick a video on the phone and convert: the phone uploads over the local network, this PC encodes with the same native FFmpeg pipeline, and the phone downloads the result.
-
-- The server exists only while the switch is on. Switching it off closes the socket and deletes the temp folder; quitting the app does the same.
-- The switch is **remembered**: leave sharing on and it resumes by itself the next time the app opens, so the phone only needs the address once. ConvZal never installs a startup item - if the app is not running, the page simply does not answer.
-- This is the only free route to H.265 from a phone: the coding happens on the PC, so the browser's hardware-only HEVC limitation does not apply.
-- The body of the request *is* the file — it streams to a temp file and the result streams back, so phone memory is not a limit and there is no multipart parser in the path. Progress is polled, so a phone that sleeps mid-encode still finds the finished job.
-- Cancel works mid-encode, a failed or cancelled attempt is deleted rather than left half-written, and a finished file stays downloadable for an hour.
-- Nothing is uploaded anywhere: the bytes cross the local network and nothing else. If Windows Firewall asks the first time, allow ConvZal on private networks.
-
 ## Browser support
 
 Encoding depends on the device and browser exposing the requested codec through WebCodecs. Support varies by operating system, hardware, browser version, and installed codec support. The app checks support before conversion and reports which encoder it uses.
 
-When WebCodecs cannot encode the requested codec it is refused immediately with that explanation and a one-click **Switch to H.264** (see *Phones and playback*) — there is no silent fallback and nothing is uploaded. A phone that wants H.265 should use the desktop app's sharing mode below.
+When WebCodecs cannot encode the requested codec it is refused immediately with that explanation and a one-click **Use H.264** — there is no silent fallback and nothing is uploaded.
