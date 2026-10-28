@@ -1061,6 +1061,26 @@ function App() {
       // the moment ffmpeg reports the GPU encoder unusable.
       setHardware(true)
     }).catch(() => {})
+
+    // Tauri shell: first run asks once whether to download FFmpeg when none is installed.
+    // Any download progress is surfaced in the existing status line.
+    type TauriBridge = {
+      core: { invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> }
+      event: { listen: (name: string, handler: (event: { payload: Record<string, unknown> }) => void) => Promise<() => void> }
+    }
+    const tauri = (window as { __TAURI__?: TauriBridge }).__TAURI__
+    if (tauri) {
+      void tauri.event.listen('ffmpeg-download', (event) => {
+        const received = Number(event.payload.received) || 0
+        const total = Number(event.payload.total) || 0
+        setStatus(total > 0 ? `Downloading FFmpeg… ${Math.round((received / total) * 100)}%` : 'Downloading FFmpeg…')
+      })
+      void tauri.event.listen('ffmpeg-download-done', (event) => {
+        const payload = event.payload
+        setStatus(payload.ok ? `FFmpeg ready — ${String(payload.version || '')}` : `FFmpeg download failed: ${String(payload.error || '')}`)
+      })
+      void tauri.core.invoke('first_run_ffmpeg').catch(() => {})
+    }
     return () => { cancelled = true }
   }, [])
 

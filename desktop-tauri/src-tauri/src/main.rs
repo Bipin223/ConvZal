@@ -15,8 +15,6 @@ use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 
-static FFMPEG: OnceLock<Option<String>> = OnceLock::new();
-static ENCODERS: OnceLock<Vec<String>> = OnceLock::new();
 static CHILDREN: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
 static CANCELLED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
@@ -57,9 +55,40 @@ fn walk_for_ffmpeg(dir: &Path, depth: u32) -> Option<String> {
 
 /// PATH first, then the usual WinGet/Program Files locations, then a shallow disk scan of the
 /// WinGet package folders. Cached for the life of the process.
+fn ffmpeg_dir() -> Option<PathBuf> {
+    let local = std::env::var("LOCALAPPDATA").ok()?;
+    Some(PathBuf::from(local).join("ConvZal").join("ffmpeg"))
+}
+
+fn downloaded_ffmpeg() -> Option<String> {
+    let path = ffmpeg_dir()?.join("ffmpeg.exe");
+    if path.exists() { Some(path.to_string_lossy().to_string()) } else { None }
+}
+
+fn prefs_path() -> Option<PathBuf> {
+    let roaming = std::env::var("APPDATA").ok()?;
+    Some(PathBuf::from(roaming).join("ConvZal").join("engine.json"))
+}
+
+fn load_prefs() -> Value {
+    prefs_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_else(|| json!({}))
+}
+
+fn save_prefs(prefs: &Value) {
+    if let Some(path) = prefs_path() {
+        if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+        let _ = std::fs::write(path, serde_json::to_string_pretty(prefs).unwrap_or_default());
+    }
+}
+
 fn find_ffmpeg() -> Option<String> {
-    FFMPEG
-        .get_or_init(|| {
+    if let Some(path) = downloaded_ffmpeg() {
+        return Some(path);
+    }
+    {
             if let Ok(out) = Command::new("where").arg("ffmpeg").output() {
                 if out.status.success() {
                     if let Some(line) = String::from_utf8_lossy(&out.stdout).lines().next() {
@@ -95,8 +124,110 @@ fn find_ffmpeg() -> Option<String> {
                 }
             }
             None
-        })
-        .clone()
+    }
+}
+
+fn download_ffmpeg(app: &AppHandle) -> Result<String, String> {
+    let dir = ffmpeg_dir().ok_or("No LOCALAPPDATA")?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let zip_path = dir.join("ffmpeg-download.zip");
+    let url = std::env::var("CONVZAL_FFMPEG_URL")
+        .unwrap_or_else(|_| "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip".into());
+
+    let response = ureq::get(&url).call().map_err(|e| format!("Download failed: {e}"))?;
+    let total: u64 = response.header("Content-Length").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let mut reader = response.into_reader();
+    let mut file = std::fs::File::create(&zip_path).map_err(|e| e.to_string())?;
+    let mut chunk = [0u8; 65536];
+    let mut received: u64 = 0;
+    loop {
+        let read = reader.read(&mut chunk).map_err(|e| e.to_string())?;
+        if read == 0 { break; }
+        use std::io::Write;
+        file.write_all(&chunk[..read]).map_err(|e| e.to_string())?;
+        received += read as u64;
+        let _ = app.emit("ffmpeg-download", json!({ "received": received, "total": total }));
+    }
+    drop(file);
+
+    let archive_file = std::fs::File::open(&zip_path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(archive_file).map_err(|e| format!("Bad archive: {e}"))?;
+    let mut found = false;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(|e| e.to_string())?;
+        let name = entry.name().to_lowercase();
+        if name.ends_with("/bin/ffmpeg.exe") || name == "ffmpeg.exe" {
+            let target = dir.join("ffmpeg.exe");
+            let mut out = std::fs::File::create(&target).map_err(|e| e.to_string())?;
+            std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
+            found = true;
+            break;
+        }
+    }
+    let _ = std::fs::remove_file(&zip_path);
+    if !found { return Err("The archive did not contain ffmpeg.exe".into()); }
+
+    let mut prefs = load_prefs();
+    prefs["prompted"] = json!(true);
+    prefs["engine"] = json!("downloaded");
+    save_prefs(&prefs);
+    let path = dir.join("ffmpeg.exe").to_string_lossy().to_string();
+    Ok(ffmpeg_version(&path))
+}
+
+#[tauri::command]
+fn engine_state() -> Value {
+    let prefs = load_prefs();
+    match find_ffmpeg() {
+        Some(path) => json!({
+            "found": true,
+            "path": path,
+            "version": ffmpeg_version(&path),
+            "downloaded": downloaded_ffmpeg().is_some(),
+            "prompted": prefs["prompted"].as_bool().unwrap_or(false),
+        }),
+        None => json!({
+            "found": false,
+            "prompted": prefs["prompted"].as_bool().unwrap_or(false),
+            "engine": prefs["engine"].clone(),
+        }),
+    }
+}
+
+/// First run: if FFmpeg is missing and the user has not been asked yet, offer the download.
+#[tauri::command]
+async fn first_run_ffmpeg(app: AppHandle) -> Value {
+    if find_ffmpeg().is_some() {
+        return json!({ "found": true });
+    }
+    let prefs = load_prefs();
+    if prefs["prompted"].as_bool().unwrap_or(false) {
+        return json!({ "found": false, "action": "skipped" });
+    }
+    let answer = app
+        .dialog()
+        .message("FFmpeg was not found on this PC.\n\nDownload it now (~100 MB)? H.265/HEVC, AV1 and odd containers need it. Choose No to continue with the browser engine.")
+        .title("ConvZal needs FFmpeg")
+        .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom("Download".into(), "Continue without".into()))
+        .blocking_show();
+    if answer {
+        let handle = app.clone();
+        std::thread::spawn(move || {
+            let result = download_ffmpeg(&handle);
+            let _ = handle.emit("ffmpeg-download-done", json!({
+                "ok": result.is_ok(),
+                "version": result.clone().unwrap_or_default(),
+                "error": result.err().unwrap_or_default(),
+            }));
+        });
+        json!({ "found": false, "action": "downloading" })
+    } else {
+        let mut prefs = load_prefs();
+        prefs["prompted"] = json!(true);
+        prefs["engine"] = json!("none");
+        save_prefs(&prefs);
+        json!({ "found": false, "action": "declined" })
+    }
 }
 
 fn ffmpeg_version(ffmpeg: &str) -> String {
@@ -109,8 +240,7 @@ fn ffmpeg_version(ffmpeg: &str) -> String {
 }
 
 /// Names of the video encoders this FFmpeg build actually has.
-fn video_encoders() -> &'static Vec<String> {
-    ENCODERS.get_or_init(|| {
+fn video_encoders() -> Vec<String> {
         let Some(ffmpeg) = find_ffmpeg() else {
             return Vec::new();
         };
@@ -128,7 +258,6 @@ fn video_encoders() -> &'static Vec<String> {
                 }
             })
             .collect()
-    })
 }
 
 /* ------------------------------------------------------------------------- conversion */
@@ -742,6 +871,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             app_info,
             ffmpeg_info,
+            engine_state,
+            first_run_ffmpeg,
             convert_video,
             cancel_convert,
             probe_media,
