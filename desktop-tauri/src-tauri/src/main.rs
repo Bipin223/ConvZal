@@ -131,10 +131,12 @@ fn download_ffmpeg(app: &AppHandle) -> Result<String, String> {
     let dir = ffmpeg_dir().ok_or("No LOCALAPPDATA")?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let zip_path = dir.join("ffmpeg-download.zip");
-    let url = std::env::var("CONVZAL_FFMPEG_URL")
-        .unwrap_or_else(|_| "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip".into());
+    let primary = std::env::var("CONVZAL_FFMPEG_URL").unwrap_or_else(|_| {
+        "https://github.com/Bipin223/ConvZal/releases/download/ffmpeg-8.0/ffmpeg-win64.zip".into()
+    });
+    let fallback = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip".to_string();
 
-    let response = ureq::get(&url).call().map_err(|e| format!("Download failed: {e}"))?;
+    let response = ureq::get(&primary).call().or_else(|_| ureq::get(&fallback).call()).map_err(|e| format!("Download failed: {e}"))?;
     let total: u64 = response.header("Content-Length").and_then(|v| v.parse().ok()).unwrap_or(0);
     let mut reader = response.into_reader();
     let mut file = std::fs::File::create(&zip_path).map_err(|e| e.to_string())?;
