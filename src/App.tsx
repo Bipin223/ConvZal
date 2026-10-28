@@ -1617,17 +1617,25 @@ function App() {
 
       <header className="topbar">
         <a className="brand" href="/" aria-label="ConvZal home">
-          <span className="brand-mark">C</span>
+          <span className="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 64 64">
+              <defs>
+                <linearGradient id="brand-grad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0" stopColor="#3d9bff" />
+                  <stop offset="1" stopColor="#0a63d6" />
+                </linearGradient>
+              </defs>
+              <rect width="64" height="64" rx="15" fill="url(#brand-grad)" />
+              <path d="M32 16v21" fill="none" stroke="#fff" strokeWidth="6.5" strokeLinecap="round" />
+              <path d="M21.5 29.5 32 40l10.5-10.5" fill="none" stroke="#fff" strokeWidth="6.5" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M20 48h24" stroke="#fff" strokeWidth="5" strokeLinecap="round" />
+            </svg>
+          </span>
           <span className="brand-copy">
-            <span className="brand-name">CONVZAL</span>
-            <span className="brand-tag">Video &amp; MP4 converter</span>
+            <span className="brand-name">ConvZal</span>
           </span>
         </a>
         <div className="topbar-actions">
-          <span className="privacy-pill" title="Everything runs on this device">
-            <span className="status-dot" />
-            {desktopMode ? 'NATIVE ENGINE' : 'DEVICE-ONLY'}
-          </span>
           <button
             className="theme-toggle"
             type="button"
@@ -1648,11 +1656,7 @@ function App() {
         </div>
       </header>
 
-      <section className="intro">
-        <p className="eyebrow"><span aria-hidden="true" />LOCAL VIDEO CONVERTER</p>
-        <h1>Video and <em>MP4</em> converter.</h1>
-        <p className="intro-sub">Shrink it locally, keep the quality. Nothing ever leaves this device.</p>
-      </section>
+      <h1 className="sr-only">ConvZal - local video converter</h1>
 
       <section className="card" aria-label="Video converter">
         {/* -------------------------------------------------- source pane */}
@@ -1729,15 +1733,7 @@ function App() {
             <button type="button" className="ghost-button" onClick={() => void chooseOutputFolder()}>Choose</button>
           </div>
 
-          <div className="privacy-note">
-            <span className="lock-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="9.5" rx="2.2" /><path d="M8.2 10.5V8a3.8 3.8 0 0 1 7.6 0v2.5" /></svg>
-            </span>
-            <span>
-              <strong>Private by design</strong>
-              <small>{desktopMode ? 'Encoded on this PC by FFmpeg. No upload, no account.' : 'Runs locally with WebAssembly. No upload, no account.'}</small>
-            </span>
-          </div>
+
 
           {desktopMode && canShare && (
             <div className="share-panel">
@@ -1784,7 +1780,7 @@ function App() {
 
         {/* ------------------------------------------------ settings pane */}
         <aside className="settings-panel">
-          <div className="panel-heading"><span>01</span><h2>Output settings</h2></div>
+          <div className="panel-heading"><h2>Output settings</h2></div>
 
           <Segmented<'video' | 'audio'>
             label="What to keep"
@@ -2096,7 +2092,7 @@ function App() {
         </aside>
       </section>
 
-      <footer className="footer-note">Made by Bipin Rizal</footer>
+      <footer className="footer-note">Made by Bipin</footer>
 
       {browserMode && (
         <FileBrowser
