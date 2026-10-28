@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default window capability for ConvZal",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:default"]
 }

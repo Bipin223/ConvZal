@@ -109,7 +109,7 @@ interface DesktopApi {
   saveAs: (sourcePath: string, suggestedName?: string) => Promise<string | null>
   openPath: (targetPath: string) => Promise<string>
   showItemInFolder: (targetPath: string) => Promise<boolean>
-  appInfo: () => Promise<{ platform: string; home: string; bundled: boolean }>
+  appInfo: () => Promise<{ platform: string; home: string; bundled: boolean; share?: boolean }>
   shareState: () => Promise<ShareState>
   startSharing: () => Promise<ShareState>
   stopSharing: () => Promise<ShareState>
@@ -907,6 +907,7 @@ function App() {
   // otherwise unchanged.
   const [isBusy, setIsBusy] = useState(false)
   const [desktopMode, setDesktopMode] = useState(false)
+  const [canShare, setCanShare] = useState(false)
 
   // Expected size for the manual modes. CRF is *measured* (three short samples through the
   // same encoder), target size already knows its budget, and bitrate is arithmetic for the
@@ -1050,9 +1051,11 @@ function App() {
     let cancelled = false
     const api = desktop()
     if (!api) return
-    void api.appInfo().then(() => {
+    void api.appInfo().then((info) => {
       if (cancelled) return
       setDesktopMode(true)
+
+      setCanShare(Boolean(info.share))
       // The reference H.265 converters pick the fastest working encoder without asking, so
       // the GPU starts switched on and the plan chain still falls back to the CPU encoder
       // the moment ffmpeg reports the GPU encoder unusable.
@@ -1732,11 +1735,11 @@ function App() {
             </span>
             <span>
               <strong>Private by design</strong>
-              <small>{desktopMode ? 'Encoded on this PC by the bundled FFmpeg. No upload, no account.' : 'Runs locally with WebAssembly. No upload, no account.'}</small>
+              <small>{desktopMode ? 'Encoded on this PC by FFmpeg. No upload, no account.' : 'Runs locally with WebAssembly. No upload, no account.'}</small>
             </span>
           </div>
 
-          {desktopMode && (
+          {desktopMode && canShare && (
             <div className="share-panel">
               <Switch
                 checked={Boolean(share.running)}

@@ -10,6 +10,39 @@
   </head>
   <body>
     <div id="root"></div>
+    <!-- Tauri shell: expose the same desktopAPI the UI already knows, backed by Rust and
+         the FFmpeg installed on this PC. Absent in the browser build, so the site is
+         unaffected. -->
+    <script>
+      (function () {
+        if (!window.__TAURI__) return
+        var invoke = window.__TAURI__.core.invoke
+        var listen = window.__TAURI__.event.listen
+        window.desktopAPI = {
+          getPathForFile: function () { return '' },
+          convertVideo: function (options) { return invoke('convert_video', { options: options }) },
+          cancelConvert: function (requestId) { return invoke('cancel_convert', { requestId: requestId }) },
+          readOutput: function (path) { return invoke('read_output', { path: path }) },
+          onConvertProgress: function (callback) {
+            var off = null
+            listen('convert-progress', function (event) { callback(event.payload) }).then(function (fn) { off = fn })
+            return function () { if (off) off() }
+          },
+          listDirectory: function (path, includeNonVideo) { return invoke('list_directory', { path: path, includeNonVideo: !!includeNonVideo }) },
+          pickFile: function () { return invoke('pick_file') },
+          pickFolder: function () { return invoke('pick_folder') },
+          statPath: function (path) { return invoke('stat_path', { path: path }) },
+          probeMedia: function (path) { return invoke('probe_media', { path: path }) },
+          saveAs: function (source, suggestedName) { return invoke('save_as', { source: source, suggestedName: suggestedName }) },
+          openPath: function (path) { return invoke('open_path', { path: path }) },
+          showItemInFolder: function (path) { return invoke('show_item', { path: path }) },
+          appInfo: function () { return invoke('app_info') },
+          shareState: function () { return invoke('share_state') },
+          startSharing: function () { return invoke('share_start') },
+          stopSharing: function () { return invoke('share_stop') }
+        }
+      })()
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

@@ -9,15 +9,15 @@ body {
   margin: 0;
   min-width: 320px;
   color-scheme: light;
-  background: #efeaf7;
-  color: #1d1428;
+  background: #f5f5f7;
+  color: rgba(0, 0, 0, .96);
 }
 
 /* Dark is the designed-for appearance, and the shell starts there. */
 body:has(.app-shell.dark-mode) {
   color-scheme: dark;
-  background: #0d0a15;
-  color: #edeaf4;
+  background: #000000;
+  color: rgba(255, 255, 255, .96);
 }
 
 button, input, select { font: inherit; }
