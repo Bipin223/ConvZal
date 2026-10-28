@@ -1638,19 +1638,19 @@ function App() {
       <header className="topbar">
         <a className="brand" href="/" aria-label="ConvZal home">
           <span className="brand-mark" aria-hidden="true">
-            <svg viewBox="0 0 64 64">
-              <defs>
-                <linearGradient id="brand-grad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0" stopColor="#3d9bff" />
-                  <stop offset="1" stopColor="#0a63d6" />
-                </linearGradient>
-              </defs>
-              <rect width="64" height="64" rx="15" fill="url(#brand-grad)" />
-              <path d="M32 16v21" fill="none" stroke="#fff" strokeWidth="6.5" strokeLinecap="round" />
-              <path d="M21.5 29.5 32 40l10.5-10.5" fill="none" stroke="#fff" strokeWidth="6.5" strokeLinecap="round" strokeLinejoin="round" />
-              <path d="M20 48h24" stroke="#fff" strokeWidth="5" strokeLinecap="round" />
-            </svg>
-          </span>
+              <svg viewBox="0 0 64 64">
+                <defs>
+                  <linearGradient id="brand-grad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0" stopColor="#3d9bff" />
+                    <stop offset="1" stopColor="#0a63d6" />
+                  </linearGradient>
+                </defs>
+                <rect width="64" height="64" rx="15" fill="url(#brand-grad)" />
+                <rect x="15" y="17" width="34" height="30" rx="4" fill="none" stroke="#fff" strokeWidth="4" />
+                <path d="M15 25h8M15 39h8M41 25h8M41 39h8" stroke="#fff" strokeWidth="4" strokeLinecap="round" />
+                <path d="M28 27.5 38 32l-10 4.5Z" fill="#fff" />
+              </svg>
+            </span>
           <span className="brand-copy">
             <span className="brand-name">ConvZal</span>
           </span>
