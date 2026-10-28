@@ -314,6 +314,7 @@ fn extension(container: &str) -> &'static str {
         "mov" => "mov",
         "webm" => "webm",
         "m4a" => "m4a",
+        "mp3" => "mp3",
         _ => "mp4",
     }
 }
@@ -332,7 +333,10 @@ fn output_path(input: &str, dir: Option<&str>, codec: &str, container: &str) -> 
         Some(d) if !d.trim().is_empty() => PathBuf::from(d),
         _ => source.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from(".")),
     };
-    base.join(format!("{safe}-{}.{}", slug(codec), extension(container)))
+    // Audio-only outputs are named `<stem>-audio.<ext>`, matching the browser build, rather
+    // than borrowing the video codec's slug.
+    let slug = if container == "mp3" || container == "m4a" { "audio" } else { slug(codec) };
+    base.join(format!("{safe}-{}.{}", slug, extension(container)))
         .to_string_lossy()
         .to_string()
 }
@@ -427,12 +431,15 @@ fn build_args(options: &Options, encoder: &str, output: &str) -> Vec<String> {
         args.extend([
             "-map".into(), "0:a:0".into(),
             "-vn".into(),
-            "-c:a".into(), "aac".into(),
+            "-c:a".into(), encoder.into(),
             "-b:a".into(), format!("{}k", options.audio_bitrate.unwrap_or(192.0)),
-            "-movflags".into(), "+faststart".into(),
-            "-progress".into(), "pipe:1".into(),
-            output.into(),
         ]);
+        if container == "mp3" {
+            args.extend(["-id3v2_version".into(), "3".into()]);
+        } else {
+            args.extend(["-movflags".into(), "+faststart".into()]);
+        }
+        args.extend(["-progress".into(), "pipe:1".into(), output.into()]);
         return args;
     }
 
@@ -531,13 +538,19 @@ fn run_conversion(app: &AppHandle, options: Options) -> Result<Value, String> {
     );
     let _ = std::fs::remove_file(&output);
 
-    let encoders = if options.audio_only.unwrap_or(false) {
-        vec!["aac".to_string()]
+    let audio_only = options.audio_only.unwrap_or(false);
+    let encoders = if audio_only {
+        vec![if options.container == "mp3" { "libmp3lame" } else { "aac" }.to_string()]
     } else {
         candidates(&options.codec, options.hardware.unwrap_or(false))
     };
     if encoders.is_empty() {
-        return Err(format!("This FFmpeg build has no {} encoder.", options.codec));
+        let name = if audio_only {
+            if options.container == "mp3" { "MP3" } else { "AAC" }
+        } else {
+            options.codec.as_str()
+        };
+        return Err(format!("This FFmpeg build has no {name} encoder."));
     }
 
     let mut last_error = String::new();
@@ -589,9 +602,14 @@ fn run_conversion(app: &AppHandle, options: Options) -> Result<Value, String> {
         if status.success() {
             if let Ok(meta) = std::fs::metadata(&output) {
                 if meta.len() > 0 {
+                    let codec = if audio_only {
+                        if options.container == "mp3" { "mp3" } else { "aac" }
+                    } else {
+                        options.codec.as_str()
+                    };
                     return Ok(json!({
                         "outputPath": output,
-                        "codec": options.codec,
+                        "codec": codec,
                         "container": options.container,
                         "encoder": encoder,
                         "size": meta.len(),

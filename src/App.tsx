@@ -23,6 +23,7 @@ import './App.css'
 
 type CodecId = 'hevc' | 'avc' | 'av1' | 'vp9'
 type ContainerId = 'mp4' | 'mkv' | 'mov' | 'webm'
+type AudioFormat = 'mp3' | 'm4a'
 type RateMode = 'crf' | 'bitrate' | 'size'
 type SpeedId = 'fast' | 'balanced' | 'quality'
 
@@ -156,8 +157,12 @@ const CONTAINERS: Record<ContainerId, { label: string; extension: string; mimeTy
   webm: { label: 'WebM', extension: 'webm', mimeType: 'video/webm' },
 }
 
-// Audio-only output: always AAC in an `.m4a` so it plays everywhere (phone, car, editor).
-const AUDIO_OUTPUT = { slug: 'audio', extension: 'm4a', codecName: 'AAC', containerName: 'M4A', mimeType: 'audio/mp4' }
+// Audio-only output. MP3 is the default because every phone, car stereo and editor plays
+// it; M4A (AAC) stays available for a smaller file at the same bitrate.
+const AUDIO_FORMATS: Record<AudioFormat, { label: string; codecName: string; containerName: string; extension: string; slug: string; mimeType: string }> = {
+  mp3: { label: 'MP3', codecName: 'MP3', containerName: 'MP3', extension: 'mp3', slug: 'audio', mimeType: 'audio/mpeg' },
+  m4a: { label: 'M4A', codecName: 'AAC', containerName: 'M4A', extension: 'm4a', slug: 'audio', mimeType: 'audio/mp4' },
+}
 
 // Quick buttons over the CRF slider. Lower CRF is better quality and a bigger file;
 // the slider runs the other way so "drag right = smaller".
@@ -424,15 +429,17 @@ function accelerationHint(): { browser: string; settings: string | null } {
   return { browser: 'this browser', settings: null }
 }
 
-// The native engine reports raw codes; the audio path uses `aac` / `m4a`, which are not
-// in the video matrices, so display names are resolved defensively.
+// The native engine reports raw codes; the audio path uses `aac` / `mp3` / `m4a`, which are
+// not in the video matrices, so display names are resolved defensively.
 function codecDisplayName(codec: string) {
-  if (codec === 'aac') return AUDIO_OUTPUT.codecName
+  if (codec === 'aac') return AUDIO_FORMATS.m4a.codecName
+  if (codec === 'mp3' || codec === 'libmp3lame') return AUDIO_FORMATS.mp3.codecName
   return CODECS[codec as CodecId]?.name ?? codec.toUpperCase()
 }
 
 function containerDisplayName(container: string) {
-  if (container === 'm4a') return AUDIO_OUTPUT.containerName
+  if (container === 'm4a') return AUDIO_FORMATS.m4a.containerName
+  if (container === 'mp3') return AUDIO_FORMATS.mp3.containerName
   return CONTAINERS[container as ContainerId]?.label ?? container.toUpperCase()
 }
 
@@ -561,17 +568,21 @@ async function runFfmpeg(ffmpeg: FFmpeg, args: string[], outputName: string): Pr
 // phone clip, and effectively never for a long one. Video encoding therefore always goes
 // through the device WebCodecs encoder, and the panel steers to H.264 when the chosen
 // codec has no hardware encoder on this device. The WASM core is still used for
-// audio-only extraction, where AAC encoding is quick.
+// audio-only extraction, where MP3 and AAC encoding are quick.
 
-// Audio-only WASM path: AAC in `.m4a`, mirroring the native `buildAudioArgs`.
-function buildWasmAudioArgs(o: { inputName: string; outputName: string; audioBitrate: number }): string[] {
-  return [
+// Audio-only WASM path, mirroring the native audio branch: MP3 through libmp3lame, or AAC
+// in `.m4a`.
+function buildWasmAudioArgs(o: { inputName: string; outputName: string; audioBitrate: number; format: AudioFormat }): string[] {
+  const args = [
     '-y', '-i', o.inputName,
     '-map', '0:a:0', '-vn',
-    '-c:a', 'aac', '-b:a', `${o.audioBitrate}k`,
-    '-movflags', '+faststart',
-    o.outputName,
+    '-c:a', o.format === 'mp3' ? 'libmp3lame' : 'aac',
+    '-b:a', `${o.audioBitrate}k`,
   ]
+  if (o.format === 'mp3') args.push('-id3v2_version', '3')
+  else args.push('-movflags', '+faststart')
+  args.push(o.outputName)
+  return args
 }
 
 function createOutputFormat(container: ContainerId): OutputFormat {
@@ -886,6 +897,7 @@ function App() {
   const [resolution, setResolution] = useState('source')
   const [frameRate, setFrameRate] = useState('source')
   const [audioBitrate, setAudioBitrate] = useState('192')
+  const [audioFormat, setAudioFormat] = useState<AudioFormat>('mp3')
   const [speed, setSpeed] = useState<SpeedId>('balanced')
   const [hardware, setHardware] = useState(false)
   const [audioOnly, setAudioOnly] = useState(false)
@@ -1031,9 +1043,10 @@ function App() {
   const codecName = CODECS[codec].name
   const containerLabel = CONTAINERS[container].label
   const hardwareAvailable = desktopMode
+  const audioOutput = useMemo(() => AUDIO_FORMATS[audioFormat], [audioFormat])
   // The dropdowns stay in sync with audio-only so the summary and button always agree.
-  const activeCodecName = audioOnly ? AUDIO_OUTPUT.codecName : codecName
-  const activeContainerLabel = audioOnly ? AUDIO_OUTPUT.containerName : containerLabel
+  const activeCodecName = audioOnly ? audioOutput.codecName : codecName
+  const activeContainerLabel = audioOnly ? audioOutput.containerName : containerLabel
   // Desktop probes the streams, so a silent clip is caught before the encode is attempted.
   const audioMissing = audioOnly && source?.hasAudio === false
   // Shown on phones/tablets, where a blob download often never reaches the gallery.
@@ -1324,8 +1337,8 @@ function App() {
             : crfQuality(codec, width, Math.max(2, Math.round((width * sourceHeight) / sourceWidth)), crf)
     )
 
-    // Audio-only always goes through FFmpeg WASM: its AAC encoder is quick and dependable
-    // and no video encoding is involved.
+    // Audio-only always goes through FFmpeg WASM: its MP3/AAC encoders are quick and
+    // dependable and no video encoding is involved.
     if (audioOnly) {
       setStatus('Downloading the local FFmpeg engine…')
       const ffmpeg = ffmpegRef.current
@@ -1343,12 +1356,12 @@ function App() {
       }
       ffmpeg.on('progress', onProgress)
       try {
-        setStatus('Extracting the audio locally with FFmpeg…')
-        const outputName = `output.${AUDIO_OUTPUT.extension}`
-        const bytes = await runFfmpeg(ffmpeg, buildWasmAudioArgs({ inputName, outputName, audioBitrate: Number(audioBitrate) }), outputName)
-        const blob = new Blob([bytes.buffer as ArrayBuffer], { type: AUDIO_OUTPUT.mimeType })
+        setStatus(`Extracting the audio as ${audioOutput.containerName} with FFmpeg…`)
+        const outputName = `output.${audioOutput.extension}`
+        const bytes = await runFfmpeg(ffmpeg, buildWasmAudioArgs({ inputName, outputName, audioBitrate: Number(audioBitrate), format: audioFormat }), outputName)
+        const blob = new Blob([bytes.buffer as ArrayBuffer], { type: audioOutput.mimeType })
         assertConverted(await inspectMedia(blob), { audioOnly: true, duration: source?.duration ?? 0, label: 'The audio encoder' })
-        return finalizeBrowser(blob, AUDIO_OUTPUT)
+        return finalizeBrowser(blob, audioOutput)
       } finally {
         ffmpeg.off('progress', onProgress)
       }
@@ -1484,7 +1497,7 @@ function App() {
       label: 'The device encoder',
     })
     return finalizeBrowser(produced, videoOutput(codec, container))
-  }, [source, resolution, frameRate, rateMode, videoBitrate, targetSizeMb, lossless, crf, codec, container, hardware, audioBitrate, audioOnly, finalizeBrowser, hasHardwareEncoder, alternative])
+  }, [source, resolution, frameRate, rateMode, videoBitrate, targetSizeMb, lossless, crf, codec, container, hardware, audioBitrate, audioFormat, audioOutput, audioOnly, finalizeBrowser, hasHardwareEncoder, alternative])
 
   const convert = useCallback(async () => {
     if (!source || isBusy) return
@@ -1527,7 +1540,7 @@ function App() {
             requestId,
             inputPath: source.path,
             codec,
-            container,
+            container: audioOnly ? audioFormat : container,
             audioOnly,
             mode: rateMode === 'crf' && lossless ? 'lossless' : 'crf',
             rateControl: nativePlan ? 'bitrate' : rateMode,
@@ -1572,7 +1585,7 @@ function App() {
       setIsBusy(false)
       requestIdRef.current = ''
     }
-  }, [source, isBusy, codec, container, audioOnly, rateMode, lossless, crf, videoBitrate, targetSizeMb, audioBitrate, resolution, frameRate, speed, hardware, outputDir, runBrowserConversion])
+  }, [source, isBusy, codec, container, audioOnly, audioFormat, rateMode, lossless, crf, videoBitrate, targetSizeMb, audioBitrate, resolution, frameRate, speed, hardware, outputDir, runBrowserConversion])
 
   const cancel = useCallback(async () => {
     const id = requestIdRef.current
@@ -1807,7 +1820,7 @@ function App() {
             hint={audioOnly ? 'Audio only' : 'Video + audio'}
             options={[
               { id: 'video', label: 'Video' },
-              { id: 'audio', label: 'Audio only (M4A)' },
+              { id: 'audio', label: `Audio only (${audioOutput.containerName})` },
             ]}
             value={audioOnly ? 'audio' : 'video'}
             onChange={(next) => setAudioOnly(next === 'audio')}
@@ -1816,15 +1829,31 @@ function App() {
 
           <div className="format-summary">
             <span className="field-label">Format</span>
-            <span className="format-value">{activeCodecName} · {activeContainerLabel}</span>
+            <span className="format-value">{activeCodecName === activeContainerLabel ? activeCodecName : `${activeCodecName} · ${activeContainerLabel}`}</span>
           </div>
 
-          {audioOnly && (
+          {audioOnly && (<>
+            <Segmented<AudioFormat>
+              label="Audio format"
+              hint={audioFormat === 'mp3' ? 'Plays everywhere' : 'Smaller at the same bitrate'}
+              options={[
+                { id: 'mp3', label: 'MP3' },
+                { id: 'm4a', label: 'M4A (AAC)' },
+              ]}
+              value={audioFormat}
+              onChange={setAudioFormat}
+              sentence
+            />
             <p className="panel-note">
-              The video is dropped and the soundtrack is saved as AAC in an <strong>.m4a</strong> — plays on phones,
-              cars and editors. Set the bitrate below; 192–256 kbps suits most music.
+              {audioFormat === 'mp3' ? (
+                <>The video is dropped and the soundtrack is saved as <strong>MP3</strong> (<strong>.mp3</strong>) —
+                  plays on phones, cars and editors. Set the bitrate below; 192–256 kbps suits most music.</>
+              ) : (
+                <>The video is dropped and the soundtrack is saved as <strong>AAC</strong> in an <strong>.m4a</strong> —
+                  smaller than MP3 at the same bitrate. Set the bitrate below; 192–256 kbps suits most music.</>
+              )}
             </p>
-          )}
+          </>)}
 
           {!audioOnly && (<>
           <div className="field-block">
@@ -2058,7 +2087,7 @@ function App() {
 
           <div className="action-zone">
             <button className="convert-button" type="button" disabled={!source || isBusy || audioMissing} onClick={() => void convert()}>
-              <span className="convert-label">{isBusy ? 'Encoding' : audioOnly ? 'Extract audio (M4A)' : `Convert to ${codecName}`}</span>
+              <span className="convert-label">{isBusy ? 'Encoding' : audioOnly ? `Extract audio (${audioOutput.containerName})` : `Convert to ${codecName}`}</span>
               <span className="button-arrow" aria-hidden="true">{isBusy ? `${progress}%` : '↗'}</span>
             </button>
 
@@ -2083,7 +2112,7 @@ function App() {
                   </span>
                   <span className="result-copy">
                     <strong title={result.name}>{result.name}</strong>
-                    <small>{result.sizeLabel}{result.sizeNote ? ` (${result.sizeNote})` : ''} · {result.codecName} · {result.containerName}</small>
+                    <small>{result.sizeLabel}{result.sizeNote ? ` (${result.sizeNote})` : ''} · {result.codecName}{result.containerName !== result.codecName ? ` · ${result.containerName}` : ''}</small>
                   </span>
                 </div>
                 <div className="result-actions">

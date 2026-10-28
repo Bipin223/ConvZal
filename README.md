@@ -1,12 +1,12 @@
 # ConvZal
 
-ConvZal converts video and extracts audio entirely on your own device. The web build uses WebCodecs, Mediabunny, and a local FFmpeg core for audio; the Windows build wraps the same app in a Tauri shell (no bundled FFmpeg, so it uses the machine's own encoders). Video can be encoded as H.265/HEVC, H.264/AVC, AV1, or VP9 and muxed into an MP4, MKV, MOV, or WebM container, and audio can be extracted to an **M4A** (AAC). Files are processed locally and are not uploaded.
+ConvZal converts video and extracts audio entirely on your own device. The web build uses WebCodecs, Mediabunny, and a local FFmpeg core for audio; the Windows build wraps the same app in a Tauri shell (no bundled FFmpeg, so it uses the machine's own encoders). Video can be encoded as H.265/HEVC, H.264/AVC, AV1, or VP9 and muxed into an MP4, MKV, MOV, or WebM container, and audio can be extracted to an **MP3** or an **M4A** (AAC). Files are processed locally and are not uploaded.
 
 **Live:** <https://bipin223.github.io/ConvZal/> — the browser version, nothing to install. Every push to `main` builds and deploys it through `.github/workflows/deploy.yml`.
 
 ## Controls
 
-- **What to keep** — *Video* keeps picture and sound; *Audio only (M4A)* drops the video and writes the soundtrack as AAC in an `.m4a` (plays on phones, cars and editors).
+- **What to keep** — *Video* keeps picture and sound; *Audio only* drops the video and writes the soundtrack as **MP3** (plays in every player and car stereo) or **AAC in an `.m4a`** (a little smaller at the same bitrate). MP3 is the default.
 - **Rate control** — a CRF quality slider (0–51, where a higher number means a smaller file), a whole-file **Target size** budget (10/20/50 MB presets), or — in the desktop build — a fixed bitrate. Quick chips set the usual CRF 32 / 23 / 18 points.
 - **Lossless** — a switch that encodes bit-exactly (H.265 `lossless=1`, H.264 `-qp 0`, VP9/AV1 lossless). Files are very large; it is off by default.
 - **Encoding effort** — Fast / Balanced / Thorough maps onto each encoder's own preset. WebCodecs exposes no such knob, so the control only does something in the desktop build and says so.
@@ -19,7 +19,7 @@ In the browser, video is encoded with the device's own WebCodecs encoder. There 
 
 That means a codec the device cannot encode in hardware (usually H.265, AV1 and VP9 on Windows) cannot be produced in the browser at all. ConvZal says so instead of hanging: if the default H.265 has no hardware encoder it moves to H.264 automatically, the panel explains exactly why, and offers a one-click **Switch to H.264**. Choosing H.265 anyway is refused immediately with the same explanation. The **desktop app** bundles native FFmpeg and does H.265 and AV1 at full speed, so that is where to go for them.
 
-Audio-only extraction always uses the FFmpeg core, because AAC encoding there is quick and dependable.
+Audio-only extraction always uses the FFmpeg core, because its MP3 and AAC encoders are quick and dependable.
 
 Whatever the path, the result is **checked before it is shown**: ConvZal reads the produced file back (container, video codec, audio track, duration) and refuses to present it if it is empty, truncated, or in a different codec than the one requested. Sizes are shown as a change against the original ("31% smaller", "about the same size") so a conversion can never be mistaken for "nothing happened". Cancel is available on every path, in the browser as well as the desktop app.
 
