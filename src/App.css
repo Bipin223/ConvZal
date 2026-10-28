@@ -451,7 +451,7 @@
 
 .panel-note {
   margin: 0;
-  padding: 10px 12px;
+  padding: 8px 11px;
   border: 1px solid var(--outline);
   border-radius: 12px;
   background: var(--field-bg);
@@ -489,7 +489,7 @@
 .field-block {
   display: grid;
   gap: 6px;
-  padding: 6px 0;
+  padding: 5px 0;
   border-bottom: 1px solid var(--outline);
 }
 
@@ -555,7 +555,7 @@
 .plan-line { margin: 0; color: var(--on-surface-variant); font-size: 10.5px; line-height: 1.45; }
 
 /* ------------------------------------------------------ segmented control */
-.text-segmented { display: flex; flex-direction: column; align-items: stretch; gap: 5px; padding: 5px 0; border-bottom: 1px solid var(--outline); }
+.text-segmented { display: flex; flex-direction: column; align-items: stretch; gap: 5px; padding: 4px 0; border-bottom: 1px solid var(--outline); }
 .segment-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
 .field-hint { color: var(--accent-bright); font-size: 10.5px; font-weight: 600; }
 
@@ -671,7 +671,7 @@
 .chip:disabled { opacity: .4; cursor: not-allowed; }
 
 /* ------------------------------------------------------------- switch */
-.switch-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 0; }
+.switch-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 3px 0; }
 .switch-row.disabled { opacity: .5; }
 .switch-copy { display: grid; gap: 1px; min-width: 0; }
 .switch-hint { color: var(--on-surface-faint); font-size: 9.5px; line-height: 1.3; }
