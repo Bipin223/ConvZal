@@ -11,11 +11,13 @@ import {
   Input,
   MkvOutputFormat,
   MovOutputFormat,
+  Mp3OutputFormat,
   Mp4OutputFormat,
   type OutputFormat,
   Output,
   Quality,
   WebMOutputFormat,
+  canEncodeAudio,
 } from 'mediabunny'
 import './App.css'
 
@@ -567,8 +569,11 @@ async function runFfmpeg(ffmpeg: FFmpeg, args: string[], outputName: string): Pr
 // 1080p clip it did not encode a single frame in 106 seconds - minutes of waiting for a
 // phone clip, and effectively never for a long one. Video encoding therefore always goes
 // through the device WebCodecs encoder, and the panel steers to H.264 when the chosen
-// codec has no hardware encoder on this device. The WASM core is still used for
-// audio-only extraction, where MP3 and AAC encoding are quick.
+// codec has no hardware encoder on this device.
+//
+// Audio encoding goes through Mediabunny's WebCodecs path instead: MP3 uses the small
+// LAME WASM encoder and M4A uses the browser's own AAC encoder. The WASM core remains a
+// fallback for audio-only extraction when the browser cannot decode a source codec.
 
 // Audio-only WASM path, mirroring the native audio branch: MP3 through libmp3lame, or AAC
 // in `.m4a`.
@@ -584,6 +589,30 @@ function buildWasmAudioArgs(o: { inputName: string; outputName: string; audioBit
   args.push(o.outputName)
   return args
 }
+
+// The fast browser path: Mediabunny decodes the audio with WebCodecs and encodes it with
+// LAME (WASM) for MP3, or the browser's native AAC encoder for M4A. No 32 MB FFmpeg core
+// download is involved. The package is loaded lazily, only when an MP3 is requested.
+let mp3EncoderReady: Promise<void> | null = null
+function ensureMp3Encoder(): Promise<void> {
+  if (!mp3EncoderReady) {
+    mp3EncoderReady = (async () => {
+      if (await canEncodeAudio('mp3')) return
+      // Vite turns this into a separate chunk so the page load stays light.
+      const { registerMp3Encoder } = await import('@mediabunny/mp3-encoder')
+      registerMp3Encoder()
+    })().catch((error) => {
+      // Let a later attempt try again instead of poisoning the path for the whole session.
+      mp3EncoderReady = null
+      throw error
+    })
+  }
+  return mp3EncoderReady
+}
+
+// LAME handles mono/stereo at these rates (and their halves); anything else is resampled
+// to 48 kHz, which every browser audio decoder can produce.
+const MP3_SAMPLE_RATES = [8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000]
 
 function createOutputFormat(container: ContainerId): OutputFormat {
   if (container === 'mkv') return new MkvOutputFormat()
@@ -1294,9 +1323,107 @@ function App() {
     }
   }, [source])
 
+  // Fast audio-only path: native WebCodecs decodes the soundtrack and a small WASM LAME
+  // encoder (or the browser's native AAC encoder) writes it. This avoids downloading the
+  // 32 MB FFmpeg core for the common case; the fallback below still handles codecs this
+  // browser cannot decode.
+  const runBrowserAudioConversion = useCallback(async (file: File): Promise<ConvertResult> => {
+    const kbps = Math.max(32, Math.min(320, Number(audioBitrate) || 192))
+    const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
+    try {
+      const audioTrack = await input.getPrimaryAudioTrack()
+      if (!audioTrack) throw new Error('this file has no audio track')
+      const channels = Math.min(2, await audioTrack.getNumberOfChannels())
+      const sourceRate = await audioTrack.getSampleRate()
+
+      let outputFormat: OutputFormat
+      if (audioFormat === 'mp3') {
+        setStatus('Preparing the MP3 encoder…')
+        await ensureMp3Encoder()
+        outputFormat = new Mp3OutputFormat()
+      } else {
+        // Chrome/Edge ship an AAC encoder; Firefox may not, and then the FFmpeg core runs.
+        if (!(await canEncodeAudio('aac'))) throw new Error('this browser has no AAC audio encoder')
+        outputFormat = new Mp4OutputFormat({ fastStart: 'in-memory' })
+      }
+
+      const output = new Output({ format: outputFormat, target: new BufferTarget() })
+      const sampleRate = audioFormat === 'mp3' && !MP3_SAMPLE_RATES.includes(sourceRate) ? 48000 : sourceRate
+      setStatus(`Encoding ${audioOutput.containerName} with the device audio encoder…`)
+      const conversion = await Conversion.init({
+        input,
+        output,
+        tracks: 'primary',
+        video: { discard: true },
+        audio: {
+          codec: audioFormat === 'mp3' ? 'mp3' : 'aac',
+          quality: new Quality({ bitrate: kbps * 1000, bitrateMode: 'constant' }),
+          forceTranscode: true,
+          ...(audioFormat === 'mp3' ? { numberOfChannels: channels, sampleRate } : {}),
+        },
+        showWarnings: false,
+      })
+      if (!conversion.isValid) {
+        throw new Error(`this browser has no ${audioOutput.containerName} audio encoder available`)
+      }
+      browserJobRef.current = conversion
+      conversion.onProgress = (value) => {
+        setProgress(Math.max(0, Math.min(100, Math.round(value * 100))))
+      }
+      try {
+        await conversion.execute()
+      } finally {
+        browserJobRef.current = null
+      }
+      if (!output.target.buffer) throw new Error('the audio encoder returned an empty file')
+      const blob = new Blob([output.target.buffer], { type: audioOutput.mimeType })
+      assertConverted(await inspectMedia(blob), { audioOnly: true, duration: source?.duration ?? 0, label: 'The audio encoder' })
+      return finalizeBrowser(blob, audioOutput)
+    } finally {
+      input.dispose()
+    }
+  }, [audioBitrate, audioFormat, audioOutput, finalizeBrowser, source?.duration])
+
   const runBrowserConversion = useCallback(async (): Promise<ConvertResult> => {
     const file = source?.file
     if (!file) throw new Error('this file cannot be read in the browser')
+    if (audioOnly) {
+      // Fast path first. If this browser cannot decode the source audio, or the encoder
+      // cannot be loaded, fall through to the FFmpeg core instead of failing the job.
+      try {
+        return await runBrowserAudioConversion(file)
+      } catch (error) {
+        if (cancelRequestedRef.current) throw error
+        console.warn('The fast audio path could not handle this file; falling back to FFmpeg.', error)
+      }
+
+      setStatus('Downloading the local FFmpeg engine…')
+      const ffmpeg = ffmpegRef.current
+      if (!ffmpeg.loaded) {
+        const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm'
+        const coreURL = await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript')
+        const wasmURL = await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm')
+        await ffmpeg.load({ coreURL, wasmURL })
+      }
+      const inputExtension = file.name.split('.').pop()?.toLowerCase() || 'mp4'
+      const inputName = `input.${inputExtension}`
+      await ffmpeg.writeFile(inputName, await fetchFile(file))
+      const onProgress = (event: { progress: number }) => {
+        setProgress(Math.max(0, Math.min(100, Math.round(event.progress * 100))))
+      }
+      ffmpeg.on('progress', onProgress)
+      try {
+        setStatus(`Extracting the audio as ${audioOutput.containerName} with FFmpeg…`)
+        const outputName = `output.${audioOutput.extension}`
+        const bytes = await runFfmpeg(ffmpeg, buildWasmAudioArgs({ inputName, outputName, audioBitrate: Number(audioBitrate), format: audioFormat }), outputName)
+        const blob = new Blob([bytes.buffer as ArrayBuffer], { type: audioOutput.mimeType })
+        assertConverted(await inspectMedia(blob), { audioOnly: true, duration: source?.duration ?? 0, label: 'The audio encoder' })
+        return finalizeBrowser(blob, audioOutput)
+      } finally {
+        ffmpeg.off('progress', onProgress)
+      }
+    }
+
     const sourceWidth = source?.width || 1920
     const sourceHeight = source?.height || 1080
 
@@ -1336,36 +1463,6 @@ function App() {
             ? new Quality({ quantizer: 0 })
             : crfQuality(codec, width, Math.max(2, Math.round((width * sourceHeight) / sourceWidth)), crf)
     )
-
-    // Audio-only always goes through FFmpeg WASM: its MP3/AAC encoders are quick and
-    // dependable and no video encoding is involved.
-    if (audioOnly) {
-      setStatus('Downloading the local FFmpeg engine…')
-      const ffmpeg = ffmpegRef.current
-      if (!ffmpeg.loaded) {
-        const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm'
-        const coreURL = await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript')
-        const wasmURL = await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm')
-        await ffmpeg.load({ coreURL, wasmURL })
-      }
-      const inputExtension = file.name.split('.').pop()?.toLowerCase() || 'mp4'
-      const inputName = `input.${inputExtension}`
-      await ffmpeg.writeFile(inputName, await fetchFile(file))
-      const onProgress = (event: { progress: number }) => {
-        setProgress(Math.max(0, Math.min(100, Math.round(event.progress * 100))))
-      }
-      ffmpeg.on('progress', onProgress)
-      try {
-        setStatus(`Extracting the audio as ${audioOutput.containerName} with FFmpeg…`)
-        const outputName = `output.${audioOutput.extension}`
-        const bytes = await runFfmpeg(ffmpeg, buildWasmAudioArgs({ inputName, outputName, audioBitrate: Number(audioBitrate), format: audioFormat }), outputName)
-        const blob = new Blob([bytes.buffer as ArrayBuffer], { type: audioOutput.mimeType })
-        assertConverted(await inspectMedia(blob), { audioOnly: true, duration: source?.duration ?? 0, label: 'The audio encoder' })
-        return finalizeBrowser(blob, audioOutput)
-      } finally {
-        ffmpeg.off('progress', onProgress)
-      }
-    }
 
     // Video has exactly one usable path: the device WebCodecs encoder. There is no
     // WebAssembly fallback - the bundled core's x264/x265 is noasm and single-threaded and
@@ -1497,7 +1594,7 @@ function App() {
       label: 'The device encoder',
     })
     return finalizeBrowser(produced, videoOutput(codec, container))
-  }, [source, resolution, frameRate, rateMode, videoBitrate, targetSizeMb, lossless, crf, codec, container, hardware, audioBitrate, audioFormat, audioOutput, audioOnly, finalizeBrowser, hasHardwareEncoder, alternative])
+  }, [source, resolution, frameRate, rateMode, videoBitrate, targetSizeMb, lossless, crf, codec, container, hardware, audioBitrate, audioFormat, audioOutput, audioOnly, finalizeBrowser, runBrowserAudioConversion, hasHardwareEncoder, alternative])
 
   const convert = useCallback(async () => {
     if (!source || isBusy) return

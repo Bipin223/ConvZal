@@ -1,6 +1,6 @@
 # ConvZal
 
-ConvZal converts video and extracts audio entirely on your own device. The web build uses WebCodecs, Mediabunny, and a local FFmpeg core for audio; the Windows build wraps the same app in a Tauri shell (no bundled FFmpeg, so it uses the machine's own encoders). Video can be encoded as H.265/HEVC, H.264/AVC, AV1, or VP9 and muxed into an MP4, MKV, MOV, or WebM container, and audio can be extracted to an **MP3** or an **M4A** (AAC). Files are processed locally and are not uploaded.
+ConvZal converts video and extracts audio entirely on your own device. The web build uses WebCodecs, Mediabunny (with the LAME MP3 encoder extension), and a local FFmpeg core as a fallback for audio the browser cannot decode; the Windows build wraps the same app in a Tauri shell (no bundled FFmpeg, so it uses the machine's own encoders). Video can be encoded as H.265/HEVC, H.264/AVC, AV1, or VP9 and muxed into an MP4, MKV, MOV, or WebM container, and audio can be extracted to an **MP3** or an **M4A** (AAC). Files are processed locally and are not uploaded.
 
 **Live:** <https://bipin223.github.io/ConvZal/> — the browser version, nothing to install. Every push to `main` builds and deploys it through `.github/workflows/deploy.yml`.
 
@@ -19,7 +19,7 @@ In the browser, video is encoded with the device's own WebCodecs encoder. There 
 
 That means a codec the device cannot encode in hardware (usually H.265, AV1 and VP9 on Windows) cannot be produced in the browser at all. ConvZal says so instead of hanging: if the default H.265 has no hardware encoder it moves to H.264 automatically, the panel explains exactly why, and offers a one-click **Switch to H.264**. Choosing H.265 anyway is refused immediately with the same explanation. The **desktop app** bundles native FFmpeg and does H.265 and AV1 at full speed, so that is where to go for them.
 
-Audio-only extraction always uses the FFmpeg core, because its MP3 and AAC encoders are quick and dependable.
+Audio-only extraction uses Mediabunny's native WebCodecs decoding plus a small WASM LAME encoder for MP3, or the browser's own AAC encoder for M4A. The FFmpeg core is only downloaded as a fallback when the browser cannot decode the source's audio codec, so the common case no longer waits for a 32 MB engine download.
 
 Whatever the path, the result is **checked before it is shown**: ConvZal reads the produced file back (container, video codec, audio track, duration) and refuses to present it if it is empty, truncated, or in a different codec than the one requested. Sizes are shown as a change against the original ("31% smaller", "about the same size") so a conversion can never be mistaken for "nothing happened". Cancel is available on every path, in the browser as well as the desktop app.
 

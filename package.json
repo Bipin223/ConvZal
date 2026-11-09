@@ -16,7 +16,8 @@
     "@ffmpeg/ffmpeg": "^0.12.15",
     "@ffmpeg/util": "^0.12.2",
     "@fontsource-variable/inter": "^5.3.0",
-    "mediabunny": "^1.61.3",
+    "@mediabunny/mp3-encoder": "^1.65.2",
+    "mediabunny": "^1.65.2",
     "qrcode": "^1.5.4",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
