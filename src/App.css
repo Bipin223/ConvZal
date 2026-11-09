@@ -979,10 +979,24 @@
   transition: background .2s var(--ease-move), color .2s var(--ease-move);
 }
 .side-link:hover { color: var(--accent-bright); background: var(--press); }
+.side-link.active { color: var(--accent-bright); background: var(--accent-container); }
 .side-link svg { width: 15px; height: 15px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .side-divider { height: 1px; margin: 6px 8px; background: var(--outline); }
 
 .browser-list { overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 2px; }
+.recent-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 10px 6px;
+  color: var(--on-surface-faint);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.recent-heading span { font-size: 9.5px; font-weight: 500; letter-spacing: 0; text-transform: none; opacity: .8; }
 .browser-empty { margin: 24px auto; color: var(--on-surface-faint); font-size: 12px; }
 .browser-empty.error { color: var(--danger); }
 .entry {

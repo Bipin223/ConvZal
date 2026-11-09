@@ -37,6 +37,13 @@ type BrowserEntry = {
   sizeLabel?: string
 }
 
+type RecentFile = {
+  name: string
+  path: string
+  sizeLabel?: string
+  openedAt: number
+}
+
 type BrowserListing = {
   ok: boolean
   error?: string
@@ -199,6 +206,39 @@ function createRequestId() {
 
 function basename(target: string) {
   return target.split(/[\\/]/).filter(Boolean).pop() || target
+}
+
+// The custom desktop picker remembers the last handful of files it opened. Persisting this
+// in localStorage keeps the list across app launches and lets the picker show the newest
+// file first instead of an empty "This PC" root.
+const RECENT_FILES_KEY = 'convzal.recent-files.v1'
+const RECENT_FILES_LIMIT = 8
+
+function readRecentFiles(): RecentFile[] {
+  try {
+    const raw = localStorage.getItem(RECENT_FILES_KEY)
+    if (!raw) return []
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .filter((entry): entry is RecentFile => {
+        if (!entry || typeof entry !== 'object') return false
+        const record = entry as Record<string, unknown>
+        return typeof record.path === 'string' && typeof record.name === 'string' && typeof record.openedAt === 'number'
+      })
+      .sort((a, b) => b.openedAt - a.openedAt)
+      .slice(0, RECENT_FILES_LIMIT)
+  } catch {
+    return []
+  }
+}
+
+function rememberRecentFile(file: RecentFile) {
+  try {
+    const next = [file, ...readRecentFiles().filter((entry) => entry.path.toLowerCase() !== file.path.toLowerCase())]
+      .slice(0, RECENT_FILES_LIMIT)
+    localStorage.setItem(RECENT_FILES_KEY, JSON.stringify(next))
+  } catch { /* storage can be unavailable in private windows */ }
 }
 
 function formatBytes(bytes: number) {
@@ -718,6 +758,8 @@ function FileBrowser({ mode, initialPath, onClose, onChooseFile, onChooseFolder 
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [selected, setSelected] = useState<BrowserEntry | null>(null)
+  const [recentFiles] = useState<RecentFile[]>(() => (mode === 'file' ? readRecentFiles() : []))
+  const [showRecent, setShowRecent] = useState(() => mode === 'file' && recentFiles.length > 0)
   const [manualPath, setManualPath] = useState(initialPath || '')
   const listRef = useRef<HTMLDivElement>(null)
 
@@ -741,6 +783,11 @@ function FileBrowser({ mode, initialPath, onClose, onChooseFile, onChooseFolder 
     }
   }, [api])
 
+  const openFolder = useCallback((targetPath: string) => {
+    setShowRecent(false)
+    void load(targetPath)
+  }, [load])
+
   // oxlint-disable-next-line react/set-state-in-effect -- loading a directory is a fetch
   useEffect(() => { void load(initialPath || '') }, [load, initialPath])
   useEffect(() => { if (listRef.current) listRef.current.scrollTop = 0 }, [listing?.path])
@@ -754,9 +801,15 @@ function FileBrowser({ mode, initialPath, onClose, onChooseFile, onChooseFolder 
   const crumbs = useMemo(() => buildCrumbs(listing?.path || ''), [listing?.path])
   // In folder mode only directories are actionable; in file mode everything is.
   const entries = useMemo(() => (listing?.entries || []).filter((entry) => (mode === 'folder' ? entry.type === 'directory' : true)), [listing, mode])
+  const recentEntries = useMemo<BrowserEntry[]>(() => recentFiles.map((file) => ({
+    name: file.name,
+    path: file.path,
+    type: 'file',
+    sizeLabel: file.sizeLabel,
+  })), [recentFiles])
 
   const openEntry = (entry: BrowserEntry) => {
-    if (entry.type === 'directory') void load(entry.path)
+    if (entry.type === 'directory') openFolder(entry.path)
     else if (mode === 'file') onChooseFile(entry.path)
   }
 
@@ -780,6 +833,26 @@ function FileBrowser({ mode, initialPath, onClose, onChooseFile, onChooseFolder 
     }
   }
 
+  const entryRow = (entry: BrowserEntry) => (
+    <button
+      type="button"
+      key={entry.path}
+      className={`entry ${selected?.path === entry.path ? 'selected' : ''}`}
+      onClick={() => setSelected(entry)}
+      onDoubleClick={() => openEntry(entry)}
+    >
+      <span className={`entry-icon ${entry.type}`} aria-hidden="true">
+        {entry.type === 'directory' ? (
+          <svg viewBox="0 0 24 24"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l1.6 2H19.5A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5Z" /></svg>
+        ) : (
+          <svg viewBox="0 0 24 24"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h7L20 11.5V19a1 1 0 0 1-1 1H5.5A1.5 1.5 0 0 1 4 18.5Z" /><path d="M12.5 4v7.5H20" /></svg>
+        )}
+      </span>
+      <span className="entry-name">{entry.name}</span>
+      <span className="entry-meta">{entry.type === 'directory' ? 'Folder' : entry.sizeLabel || ''}</span>
+    </button>
+  )
+
   return (
     <div className="browser-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
       <div className="browser" role="dialog" aria-modal="true" aria-label={mode === 'folder' ? 'Choose an output folder' : 'Choose a video'}>
@@ -795,20 +868,20 @@ function FileBrowser({ mode, initialPath, onClose, onChooseFile, onChooseFolder 
           <button
             type="button"
             className="tool-button"
-            onClick={() => listing?.parent && load(listing.parent)}
+            onClick={() => listing?.parent && openFolder(listing.parent)}
             disabled={!listing?.parent}
             title="Go up one level"
           >
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
             Up
           </button>
-          <button type="button" className="tool-button" onClick={() => load('')} title="Show drives and shortcuts">
+          <button type="button" className="tool-button" onClick={() => openFolder('')} title="Show drives and shortcuts">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7l9-4 9 4-9 4-9-4Z" /><path d="M3 12l9 4 9-4" /><path d="M3 17l9 4 9-4" /></svg>
             Drives
           </button>
           <form
             className="path-form"
-            onSubmit={(event) => { event.preventDefault(); void load(manualPath) }}
+            onSubmit={(event) => { event.preventDefault(); openFolder(manualPath) }}
           >
             <input
               value={manualPath}
@@ -822,26 +895,49 @@ function FileBrowser({ mode, initialPath, onClose, onChooseFile, onChooseFolder 
         </div>
 
         <nav className="breadcrumbs" aria-label="Current folder">
-          <button type="button" onClick={() => load('')}>This PC</button>
-          {crumbs.map((crumb, index) => (
-            <span key={crumb.path}>
-              <i aria-hidden="true">›</i>
-              <button type="button" onClick={() => load(crumb.path)} disabled={index === crumbs.length - 1}>{crumb.label}</button>
-            </span>
-          ))}
+          {showRecent ? (
+            <>
+              <button type="button" onClick={() => openFolder('')}>This PC</button>
+              <span>
+                <i aria-hidden="true">›</i>
+                <button type="button" disabled>Recent</button>
+              </span>
+            </>
+          ) : (
+            <>
+              <button type="button" onClick={() => openFolder('')}>This PC</button>
+              {crumbs.map((crumb, index) => (
+                <span key={crumb.path}>
+                  <i aria-hidden="true">›</i>
+                  <button type="button" onClick={() => openFolder(crumb.path)} disabled={index === crumbs.length - 1}>{crumb.label}</button>
+                </span>
+              ))}
+            </>
+          )}
         </nav>
 
         <div className="browser-body">
           <aside className="browser-side">
+            {mode === 'file' && recentFiles.length > 0 && (<>
+              <button
+                type="button"
+                className={`side-link ${showRecent ? 'active' : ''}`}
+                onClick={() => { setSelected(null); setShowRecent(true) }}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" /><path d="M12 7.5V12l3 1.8" /></svg>
+                Recent
+              </button>
+              <span className="side-divider" />
+            </>)}
             {(listing?.shortcuts || []).map((shortcut) => (
-              <button type="button" key={shortcut.path} className="side-link" onClick={() => load(shortcut.path)}>
+              <button type="button" key={shortcut.path} className="side-link" onClick={() => openFolder(shortcut.path)}>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l1.6 2H19.5A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5Z" /></svg>
                 {shortcut.label}
               </button>
             ))}
             {(listing?.roots || []).length > 0 && <span className="side-divider" />}
             {(listing?.roots || []).map((root) => (
-              <button type="button" key={root} className="side-link" onClick={() => load(root)}>
+              <button type="button" key={root} className="side-link" onClick={() => openFolder(root)}>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4z" /><path d="M4 10h16" /></svg>
                 {root}
               </button>
@@ -849,28 +945,20 @@ function FileBrowser({ mode, initialPath, onClose, onChooseFile, onChooseFolder 
           </aside>
 
           <div className="browser-list" ref={listRef}>
-            {loading && <p className="browser-empty">Loading…</p>}
-            {!loading && error && <p className="browser-empty error">{error}</p>}
-            {!loading && !error && entries.length === 0 && <p className="browser-empty">Nothing here to show.</p>}
-            {!loading && !error && entries.map((entry) => (
-              <button
-                type="button"
-                key={entry.path}
-                className={`entry ${selected?.path === entry.path ? 'selected' : ''}`}
-                onClick={() => setSelected(entry)}
-                onDoubleClick={() => openEntry(entry)}
-              >
-                <span className={`entry-icon ${entry.type}`} aria-hidden="true">
-                  {entry.type === 'directory' ? (
-                    <svg viewBox="0 0 24 24"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l1.6 2H19.5A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5Z" /></svg>
-                  ) : (
-                    <svg viewBox="0 0 24 24"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h7L20 11.5V19a1 1 0 0 1-1 1H5.5A1.5 1.5 0 0 1 4 18.5Z" /><path d="M12.5 4v7.5H20" /></svg>
-                  )}
-                </span>
-                <span className="entry-name">{entry.name}</span>
-                <span className="entry-meta">{entry.type === 'directory' ? 'Folder' : entry.sizeLabel || ''}</span>
-              </button>
-            ))}
+            {showRecent ? (
+              <>
+                <div className="recent-heading">Recent files <span>Newest first</span></div>
+                {recentEntries.length === 0 && <p className="browser-empty">No recent files yet.</p>}
+                {recentEntries.map(entryRow)}
+              </>
+            ) : (
+              <>
+                {loading && <p className="browser-empty">Loading…</p>}
+                {!loading && error && <p className="browser-empty error">{error}</p>}
+                {!loading && !error && entries.length === 0 && <p className="browser-empty">Nothing here to show.</p>}
+                {!loading && !error && entries.map(entryRow)}
+              </>
+            )}
           </div>
         </div>
 
@@ -1222,9 +1310,15 @@ function App() {
       api ? api.probeMedia(targetPath) : Promise.resolve<MediaProbe>({ ok: false, duration: 0, width: 0, height: 0 }),
       api ? api.statPath(targetPath) : Promise.resolve<{ ok: boolean; size?: number; sizeLabel?: string }>({ ok: false }),
     ])
+    const name = basename(targetPath)
+    if (!stats.ok) {
+      setStatus(`Could not open ${name} — it may have been moved or deleted`)
+      return
+    }
+    rememberRecentFile({ path: targetPath, name, sizeLabel: stats.sizeLabel, openedAt: Date.now() })
     setSource({
-      name: basename(targetPath),
-      size: stats.ok && stats.size ? stats.size : 0,
+      name,
+      size: stats.size ? stats.size : 0,
       duration: info.duration || 0,
       width: info.width || 0,
       height: info.height || 0,
