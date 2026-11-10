@@ -35,6 +35,7 @@ type BrowserEntry = {
   type: 'directory' | 'video' | 'audio' | 'file'
   size?: number
   sizeLabel?: string
+  modified?: number
 }
 
 type RecentFile = {
@@ -112,6 +113,7 @@ interface DesktopApi {
   readOutput: (outputPath: string) => Promise<Uint8Array>
   onConvertProgress: (callback: (payload: { requestId: string; seconds: number }) => void) => () => void
   listDirectory: (targetPath: string, includeNonVideo?: boolean) => Promise<BrowserListing>
+  recentMedia?: (limit?: number) => Promise<BrowserEntry[]>
   pickFile: () => Promise<string | null>
   pickFolder: () => Promise<string | null>
   statPath: (targetPath: string) => Promise<{ ok: boolean; size?: number; sizeLabel?: string }>
@@ -758,8 +760,9 @@ function FileBrowser({ mode, initialPath, onClose, onChooseFile, onChooseFolder 
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [selected, setSelected] = useState<BrowserEntry | null>(null)
-  const [recentFiles] = useState<RecentFile[]>(() => (mode === 'file' ? readRecentFiles() : []))
-  const [showRecent, setShowRecent] = useState(() => mode === 'file' && recentFiles.length > 0)
+  const [recentFiles, setRecentFiles] = useState<RecentFile[]>(() => (mode === 'file' ? readRecentFiles() : []))
+  const [showRecent, setShowRecent] = useState(mode === 'file')
+  const [recentLoading, setRecentLoading] = useState(() => mode === 'file' && recentFiles.length === 0)
   const [manualPath, setManualPath] = useState(initialPath || '')
   const listRef = useRef<HTMLDivElement>(null)
 
@@ -790,6 +793,31 @@ function FileBrowser({ mode, initialPath, onClose, onChooseFile, onChooseFolder 
 
   // oxlint-disable-next-line react/set-state-in-effect -- loading a directory is a fetch
   useEffect(() => { void load(initialPath || '') }, [load, initialPath])
+  // First run has no app history yet: ask Windows for the newest media files so the Recent
+  // view is useful immediately instead of starting empty.
+  // oxlint-disable-next-line react/set-state-in-effect -- the recent-file scan is a fetch
+  useEffect(() => {
+    if (mode !== 'file' || recentFiles.length > 0 || !api?.recentMedia) {
+      setRecentLoading(false)
+      return
+    }
+    let cancelled = false
+    setRecentLoading(true)
+    void api.recentMedia(8)
+      .then((entries) => {
+        if (cancelled) return
+        const files = entries.map((entry) => ({
+          name: entry.name,
+          path: entry.path,
+          sizeLabel: entry.sizeLabel,
+          openedAt: entry.modified ?? Date.now(),
+        }))
+        if (files.length > 0) setRecentFiles(files)
+      })
+      .catch(() => { /* no recent scan: the folder view still works */ })
+      .finally(() => { if (!cancelled) setRecentLoading(false) })
+    return () => { cancelled = true }
+  }, [api, mode, recentFiles.length])
   useEffect(() => { if (listRef.current) listRef.current.scrollTop = 0 }, [listing?.path])
 
   useEffect(() => {
@@ -918,7 +946,7 @@ function FileBrowser({ mode, initialPath, onClose, onChooseFile, onChooseFolder 
 
         <div className="browser-body">
           <aside className="browser-side">
-            {mode === 'file' && recentFiles.length > 0 && (<>
+            {mode === 'file' && (<>
               <button
                 type="button"
                 className={`side-link ${showRecent ? 'active' : ''}`}
@@ -948,7 +976,10 @@ function FileBrowser({ mode, initialPath, onClose, onChooseFile, onChooseFolder 
             {showRecent ? (
               <>
                 <div className="recent-heading">Recent files <span>Newest first</span></div>
-                {recentEntries.length === 0 && <p className="browser-empty">No recent files yet.</p>}
+                {recentLoading && <p className="browser-empty">Finding recent files…</p>}
+                {!recentLoading && recentEntries.length === 0 && (
+                  <p className="browser-empty">No recent files yet. Open one and it will appear here.</p>
+                )}
                 {recentEntries.map(entryRow)}
               </>
             ) : (

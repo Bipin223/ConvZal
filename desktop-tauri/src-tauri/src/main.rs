@@ -823,6 +823,92 @@ fn list_directory(path: String, include_non_video: Option<bool>) -> Value {
     json!({ "ok": true, "path": path, "parent": parent, "roots": roots, "shortcuts": shortcuts(), "entries": entries })
 }
 
+fn collect_recent_media(
+    dir: &Path,
+    depth: u32,
+    max_depth: u32,
+    found: &mut Vec<(u64, PathBuf, u64)>,
+    visited: &mut usize,
+    started: std::time::Instant,
+) {
+    let expense = |visited: &mut usize| {
+        *visited += 1;
+        *visited > 20_000 || started.elapsed() > std::time::Duration::from_millis(900)
+    };
+    if depth > max_depth || *visited > 20_000 || started.elapsed() > std::time::Duration::from_millis(900) {
+        return;
+    }
+    let Ok(read) = std::fs::read_dir(dir) else { return; };
+    for entry in read.flatten() {
+        if expense(visited) { return; }
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') || name.starts_with('$') || name == "node_modules" || name == "System Volume Information" {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else { continue; };
+        if file_type.is_symlink() { continue; }
+        if file_type.is_dir() {
+            if depth < max_depth {
+                collect_recent_media(&path, depth + 1, max_depth, found, visited, started);
+            }
+            continue;
+        }
+        let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        if !VIDEO_EXTENSIONS.contains(&ext.as_str()) && !AUDIO_EXTENSIONS.contains(&ext.as_str()) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else { continue; };
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        if modified > 0 {
+            found.push((modified, path, metadata.len()));
+        }
+    }
+}
+
+#[tauri::command]
+fn recent_media(limit: Option<usize>) -> Vec<Value> {
+    let limit = limit.unwrap_or(8).clamp(1, 20);
+    let mut roots = Vec::new();
+    if let Some(home) = std::env::var_os("USERPROFILE") {
+        let home = PathBuf::from(home);
+        for name in ["Desktop", "Downloads", "Videos", "Music", "Documents"] {
+            let path = home.join(name);
+            if path.is_dir() {
+                roots.push(path);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    let mut visited = 0usize;
+    let started = std::time::Instant::now();
+    for root in roots {
+        collect_recent_media(&root, 0, 3, &mut found, &mut visited, started);
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.truncate(limit);
+    found
+        .into_iter()
+        .map(|(modified, path, size)| {
+            let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+            let is_video = VIDEO_EXTENSIONS.contains(&ext.as_str());
+            json!({
+                "name": path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".into()),
+                "path": path.to_string_lossy(),
+                "type": if is_video { "video" } else { "audio" },
+                "size": size,
+                "sizeLabel": human(size),
+                "modified": modified,
+            })
+        })
+        .collect()
+}
+
 #[tauri::command]
 fn pick_file(app: AppHandle) -> Option<String> {
     app.dialog()
@@ -908,6 +994,7 @@ fn main() {
             probe_media,
             stat_path,
             list_directory,
+            recent_media,
             pick_file,
             pick_folder,
             save_as,
