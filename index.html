@@ -30,6 +30,7 @@
           },
           listDirectory: function (path, includeNonVideo) { return invoke('list_directory', { path: path, includeNonVideo: !!includeNonVideo }) },
           recentMedia: function (limit) { return invoke('recent_media', { limit: limit || 8 }) },
+          thumbnail: function (path, size) { return invoke('media_thumbnail', { path: path, size: size || 96 }) },
           pickFile: function () { return invoke('pick_file') },
           pickFolder: function () { return invoke('pick_folder') },
           statPath: function (path) { return invoke('stat_path', { path: path }) },

@@ -7,6 +7,7 @@
 
 use serde::Deserialize;
 use serde_json::{json, Value};
+use base64::Engine as _;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -909,6 +910,77 @@ fn recent_media(limit: Option<usize>) -> Vec<Value> {
         .collect()
 }
 
+fn thumbnail_cache() -> &'static Mutex<HashMap<String, Option<String>>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn thumbnail_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn extract_thumbnail(ffmpeg: &str, path: &str, size: u32, seek: &str) -> Option<String> {
+    let filter = format!("scale={size}:{size}:force_original_aspect_ratio=decrease");
+    let output = Command::new(ffmpeg)
+        .args([
+            "-v", "error",
+            "-ss", seek,
+            "-i", path,
+            "-map", "0:v:0",
+            "-frames:v", "1",
+            "-vf", &filter,
+            "-an",
+            "-sn",
+            "-f", "image2pipe",
+            "-vcodec", "png",
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&output.stdout);
+    Some(format!("data:image/png;base64,{encoded}"))
+}
+
+#[tauri::command]
+fn media_thumbnail(path: String, size: Option<u32>) -> Option<String> {
+    let size = size.unwrap_or(96).clamp(48, 320);
+    let metadata = std::fs::metadata(&path).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let key = format!("{path}|{size}|{modified}|{}", metadata.len());
+    if let Some(cached) = thumbnail_cache().lock().ok()?.get(&key).cloned() {
+        return cached;
+    }
+
+    // FFmpeg processes are short but CPU-heavy; serialise them so opening a list of recent
+    // files does not start eight encoders at once.
+    let _guard = thumbnail_lock().lock().ok()?;
+    if let Some(cached) = thumbnail_cache().lock().ok()?.get(&key).cloned() {
+        return cached;
+    }
+    let value = find_ffmpeg().and_then(|ffmpeg| {
+        extract_thumbnail(&ffmpeg, &path, size, "1")
+            .or_else(|| extract_thumbnail(&ffmpeg, &path, size, "0"))
+    });
+    if let Ok(mut cache) = thumbnail_cache().lock() {
+        if cache.len() > 128 {
+            cache.clear();
+        }
+        cache.insert(key, value.clone());
+    }
+    value
+}
+
 #[tauri::command]
 fn pick_file(app: AppHandle) -> Option<String> {
     app.dialog()
@@ -995,6 +1067,7 @@ fn main() {
             stat_path,
             list_directory,
             recent_media,
+            media_thumbnail,
             pick_file,
             pick_folder,
             save_as,

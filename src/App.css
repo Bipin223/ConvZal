@@ -1018,6 +1018,8 @@
 .entry-icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; color: var(--on-surface-variant); background: var(--field-bg); }
 .entry-icon.directory { color: var(--accent-bright); background: var(--accent-container); }
 .entry-icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.entry-icon.with-thumb { padding: 0; overflow: hidden; }
+.entry-thumb { display: block; width: 100%; height: 100%; object-fit: cover; }
 .entry-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .entry-meta { color: var(--on-surface-faint); font-size: 10.5px; font-variant-numeric: tabular-nums; }
 

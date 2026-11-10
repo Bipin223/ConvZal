@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { FFmpeg } from '@ffmpeg/ffmpeg'
 import { fetchFile, toBlobURL } from '@ffmpeg/util'
 import { SPRING, useSpring } from './motion'
@@ -114,6 +114,7 @@ interface DesktopApi {
   onConvertProgress: (callback: (payload: { requestId: string; seconds: number }) => void) => () => void
   listDirectory: (targetPath: string, includeNonVideo?: boolean) => Promise<BrowserListing>
   recentMedia?: (limit?: number) => Promise<BrowserEntry[]>
+  thumbnail?: (path: string, size?: number) => Promise<string | null>
   pickFile: () => Promise<string | null>
   pickFolder: () => Promise<string | null>
   statPath: (targetPath: string) => Promise<{ ok: boolean; size?: number; sizeLabel?: string }>
@@ -748,6 +749,26 @@ function Switch({ checked, onChange, label, hint, disabled }: {
 
 /* ---------------------------------------------------------- file browser */
 
+// Desktop-only: ask the native side for a frame from the file. The generic file icon stays
+// visible until (and unless) a thumbnail arrives, so unsupported or audio-only files still
+// look the same as before.
+function MediaThumb({ path, children }: { path: string; children: ReactNode }) {
+  const api = desktop()
+  const [src, setSrc] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!api?.thumbnail) return
+    let cancelled = false
+    void api.thumbnail(path, 64)
+      .then((value) => { if (!cancelled && value) setSrc(value) })
+      .catch(() => { /* generic icon remains */ })
+    return () => { cancelled = true }
+  }, [api, path])
+
+  if (!src) return <>{children}</>
+  return <img className="entry-thumb" src={src} alt="" loading="lazy" />
+}
+
 function FileBrowser({ mode, initialPath, onClose, onChooseFile, onChooseFolder }: {
   mode: 'file' | 'folder'
   initialPath?: string
@@ -861,7 +882,14 @@ function FileBrowser({ mode, initialPath, onClose, onChooseFile, onChooseFolder 
     }
   }
 
-  const entryRow = (entry: BrowserEntry) => (
+  const folderIcon = (
+    <svg viewBox="0 0 24 24"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l1.6 2H19.5A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5Z" /></svg>
+  )
+  const fileIcon = (
+    <svg viewBox="0 0 24 24"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h7L20 11.5V19a1 1 0 0 1-1 1H5.5A1.5 1.5 0 0 1 4 18.5Z" /><path d="M12.5 4v7.5H20" /></svg>
+  )
+
+  const entryRow = (entry: BrowserEntry, showThumbnail = false) => (
     <button
       type="button"
       key={entry.path}
@@ -869,12 +897,12 @@ function FileBrowser({ mode, initialPath, onClose, onChooseFile, onChooseFolder 
       onClick={() => setSelected(entry)}
       onDoubleClick={() => openEntry(entry)}
     >
-      <span className={`entry-icon ${entry.type}`} aria-hidden="true">
-        {entry.type === 'directory' ? (
-          <svg viewBox="0 0 24 24"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l1.6 2H19.5A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5Z" /></svg>
-        ) : (
-          <svg viewBox="0 0 24 24"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h7L20 11.5V19a1 1 0 0 1-1 1H5.5A1.5 1.5 0 0 1 4 18.5Z" /><path d="M12.5 4v7.5H20" /></svg>
-        )}
+      <span className={`entry-icon ${entry.type} ${showThumbnail && entry.type !== 'directory' ? 'with-thumb' : ''}`} aria-hidden="true">
+        {entry.type === 'directory'
+          ? folderIcon
+          : showThumbnail
+            ? <MediaThumb path={entry.path}>{fileIcon}</MediaThumb>
+            : fileIcon}
       </span>
       <span className="entry-name">{entry.name}</span>
       <span className="entry-meta">{entry.type === 'directory' ? 'Folder' : entry.sizeLabel || ''}</span>
@@ -980,14 +1008,14 @@ function FileBrowser({ mode, initialPath, onClose, onChooseFile, onChooseFolder 
                 {!recentLoading && recentEntries.length === 0 && (
                   <p className="browser-empty">No recent files yet. Open one and it will appear here.</p>
                 )}
-                {recentEntries.map(entryRow)}
+                {recentEntries.map((entry) => entryRow(entry, true))}
               </>
             ) : (
               <>
                 {loading && <p className="browser-empty">Loading…</p>}
                 {!loading && error && <p className="browser-empty error">{error}</p>}
                 {!loading && !error && entries.length === 0 && <p className="browser-empty">Nothing here to show.</p>}
-                {!loading && !error && entries.map(entryRow)}
+                {!loading && !error && entries.map((entry) => entryRow(entry))}
               </>
             )}
           </div>
