@@ -780,8 +780,15 @@ fn list_directory(path: String, include_non_video: Option<bool>) -> Value {
             if name.starts_with('$') || name == "System Volume Information" {
                 continue;
             }
+            let metadata = std::fs::metadata(&entry_path).ok();
+            let modified = metadata
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
             if entry_path.is_dir() {
-                entries.push(json!({ "name": name, "path": entry_path.to_string_lossy(), "type": "directory" }));
+                entries.push(json!({ "name": name, "path": entry_path.to_string_lossy(), "type": "directory", "modified": modified }));
                 continue;
             }
             let ext = entry_path
@@ -793,22 +800,25 @@ fn list_directory(path: String, include_non_video: Option<bool>) -> Value {
             if !include && !is_video && !is_audio {
                 continue;
             }
-            let size = std::fs::metadata(&entry_path).map(|m| m.len()).unwrap_or(0);
+            let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
             entries.push(json!({
                 "name": name,
                 "path": entry_path.to_string_lossy(),
                 "type": if is_video { "video" } else if is_audio { "audio" } else { "file" },
                 "size": size,
                 "sizeLabel": human(size),
+                "modified": modified,
             }));
         }
     }
     entries.sort_by(|a, b| {
         let a_dir = a["type"] == "directory";
         let b_dir = b["type"] == "directory";
-        b_dir.cmp(&a_dir).then_with(|| {
-            a["name"].as_str().unwrap_or("").to_lowercase().cmp(&b["name"].as_str().unwrap_or("").to_lowercase())
-        })
+        b_dir.cmp(&a_dir)
+            .then_with(|| b["modified"].as_u64().unwrap_or(0).cmp(&a["modified"].as_u64().unwrap_or(0)))
+            .then_with(|| {
+                a["name"].as_str().unwrap_or("").to_lowercase().cmp(&b["name"].as_str().unwrap_or("").to_lowercase())
+            })
     });
     json!({ "ok": true, "path": path, "parent": parent, "roots": roots, "shortcuts": shortcuts(), "entries": entries })
 }

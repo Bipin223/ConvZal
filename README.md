@@ -87,7 +87,7 @@ The interface is deliberately built to fit on a single screen. The shell is a vi
 
 The source pane holds the drop zone and the destination row; the settings pane holds rate control, effort, GPU, codec/container, resolution/framerate and audio. Below 800px wide the card stacks into one column; below 620px the built-in file browser moves its shortcuts above the list.
 
-The desktop file picker remembers the last eight files it opened and starts on **Recent**, newest first, instead of an empty `This PC` root. Picking a file moves it to the front of that list, and the list survives app restarts.
+The desktop file picker remembers the last eight files it opened and starts on **Recent**, newest first, instead of an empty `This PC` root. Picking a file moves it to the front of that list, and the list survives app restarts. Folder contents are also ordered newest-first.
 
 ## Windows build (Tauri)
 
