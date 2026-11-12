@@ -850,6 +850,17 @@ function FileBrowser({ mode, initialPath, onClose, onChooseFile, onChooseFolder 
   const crumbs = useMemo(() => buildCrumbs(listing?.path || ''), [listing?.path])
   // In folder mode only directories are actionable; in file mode everything is.
   const entries = useMemo(() => (listing?.entries || []).filter((entry) => (mode === 'folder' ? entry.type === 'directory' : true)), [listing, mode])
+  // In a folder view, "recent" should mean recent files from *that* folder, not the global
+  // list. The backend already sorts entries newest-first inside each group.
+  const folderRecentEntries = useMemo(
+    () => (mode === 'file' ? entries.filter((entry) => entry.type !== 'directory').slice(0, 8) : []),
+    [entries, mode],
+  )
+  const folderRecentPaths = useMemo(() => new Set(folderRecentEntries.map((entry) => entry.path)), [folderRecentEntries])
+  const folderEntries = useMemo(
+    () => (folderRecentEntries.length > 0 ? entries.filter((entry) => !folderRecentPaths.has(entry.path)) : entries),
+    [entries, folderRecentEntries.length, folderRecentPaths],
+  )
   const recentEntries = useMemo<BrowserEntry[]>(() => recentFiles.map((file) => ({
     name: file.name,
     path: file.path,
@@ -1012,18 +1023,17 @@ function FileBrowser({ mode, initialPath, onClose, onChooseFile, onChooseFolder 
               </>
             ) : (
               <>
-                {(recentLoading || recentEntries.length > 0) && (
+                {folderRecentEntries.length > 0 && (
                   <>
-                    <div className="recent-heading">Recent files <span>Newest first</span></div>
-                    {recentLoading && <p className="browser-empty">Finding recent files…</p>}
-                    {recentEntries.map((entry) => entryRow(entry, true))}
-                    {entries.length > 0 && <div className="recent-divider" />}
+                    <div className="recent-heading">Recent in {basename(listing?.path || '') || 'this folder'} <span>Newest first</span></div>
+                    {folderRecentEntries.map((entry) => entryRow(entry, true))}
+                    <div className="recent-divider" />
                   </>
                 )}
                 {loading && <p className="browser-empty">Loading…</p>}
                 {!loading && error && <p className="browser-empty error">{error}</p>}
                 {!loading && !error && entries.length === 0 && <p className="browser-empty">Nothing here to show.</p>}
-                {!loading && !error && entries.map((entry) => entryRow(entry))}
+                {!loading && !error && folderEntries.map((entry) => entryRow(entry))}
               </>
             )}
           </div>
