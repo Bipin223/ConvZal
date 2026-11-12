@@ -997,6 +997,7 @@
   text-transform: uppercase;
 }
 .recent-heading span { font-size: 9.5px; font-weight: 500; letter-spacing: 0; text-transform: none; opacity: .8; }
+.recent-divider { height: 1px; margin: 6px 8px; background: var(--outline); }
 .browser-empty { margin: 24px auto; color: var(--on-surface-faint); font-size: 12px; }
 .browser-empty.error { color: var(--danger); }
 .entry {

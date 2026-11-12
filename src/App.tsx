@@ -1012,6 +1012,14 @@ function FileBrowser({ mode, initialPath, onClose, onChooseFile, onChooseFolder 
               </>
             ) : (
               <>
+                {(recentLoading || recentEntries.length > 0) && (
+                  <>
+                    <div className="recent-heading">Recent files <span>Newest first</span></div>
+                    {recentLoading && <p className="browser-empty">Finding recent files…</p>}
+                    {recentEntries.map((entry) => entryRow(entry, true))}
+                    {entries.length > 0 && <div className="recent-divider" />}
+                  </>
+                )}
                 {loading && <p className="browser-empty">Loading…</p>}
                 {!loading && error && <p className="browser-empty error">{error}</p>}
                 {!loading && !error && entries.length === 0 && <p className="browser-empty">Nothing here to show.</p>}

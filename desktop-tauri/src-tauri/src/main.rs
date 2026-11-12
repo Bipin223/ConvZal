@@ -9,12 +9,24 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use base64::Engine as _;
 use std::collections::{HashMap, HashSet};
+use std::ffi::c_void;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
+use windows::core::HSTRING;
+use windows::Win32::Foundation::SIZE;
+use windows::Win32::Graphics::Gdi::{
+    DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO, BITMAPINFOHEADER,
+    BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
+};
+use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+use windows::Win32::UI::Shell::{
+    IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF, SIIGBF_RESIZETOFIT,
+    SIIGBF_THUMBNAILONLY,
+};
 
 static CHILDREN: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
 static CANCELLED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
@@ -915,36 +927,109 @@ fn thumbnail_cache() -> &'static Mutex<HashMap<String, Option<String>>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn thumbnail_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+// Windows already keeps Explorer's thumbnails in its own cache. Asking the shell for one is
+// effectively instant; spawning FFmpeg for every row was what made the recent list lag.
+struct ComInit(bool);
+impl Drop for ComInit {
+    fn drop(&mut self) {
+        if self.0 {
+            unsafe { CoUninitialize() };
+        }
+    }
 }
 
-fn extract_thumbnail(ffmpeg: &str, path: &str, size: u32, seek: &str) -> Option<String> {
-    let filter = format!("scale={size}:{size}:force_original_aspect_ratio=decrease");
-    let output = Command::new(ffmpeg)
-        .args([
-            "-v", "error",
-            "-ss", seek,
-            "-i", path,
-            "-map", "0:v:0",
-            "-frames:v", "1",
-            "-vf", &filter,
-            "-an",
-            "-sn",
-            "-f", "image2pipe",
-            "-vcodec", "png",
-            "-",
-        ])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() || output.stdout.is_empty() {
+fn init_com() -> ComInit {
+    let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    ComInit(hr.is_ok())
+}
+
+fn build_bmp(width: i32, height: i32, pixels: &[u8]) -> Vec<u8> {
+    let image_size = pixels.len() as u32;
+    let file_size = 54 + image_size;
+    let mut out = Vec::with_capacity(file_size as usize);
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&file_size.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&54u32.to_le_bytes());
+    out.extend_from_slice(&40u32.to_le_bytes());
+    out.extend_from_slice(&width.to_le_bytes());
+    out.extend_from_slice(&height.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&24u16.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&image_size.to_le_bytes());
+    out.extend_from_slice(&2835i32.to_le_bytes());
+    out.extend_from_slice(&2835i32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(pixels);
+    out
+}
+
+fn shell_thumbnail(path: &str, size: u32) -> Option<String> {
+    let _com = init_com();
+    let factory: IShellItemImageFactory = unsafe {
+        SHCreateItemFromParsingName(&HSTRING::from(path), None)
+    }.ok()?;
+    let hbitmap = unsafe {
+        factory.GetImage(
+            SIZE { cx: size as i32, cy: size as i32 },
+            SIIGBF(SIIGBF_THUMBNAILONLY.0 | SIIGBF_RESIZETOFIT.0),
+        )
+    }.ok()?;
+    if hbitmap.is_invalid() {
         return None;
     }
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&output.stdout);
-    Some(format!("data:image/png;base64,{encoded}"))
+    let object = HGDIOBJ(hbitmap.0);
+    let mut bitmap = BITMAP::default();
+    let got = unsafe {
+        GetObjectW(object, std::mem::size_of::<BITMAP>() as i32, Some(&mut bitmap as *mut _ as *mut c_void))
+    };
+    if got == 0 || bitmap.bmWidth <= 0 || bitmap.bmHeight <= 0 {
+        unsafe { let _ = DeleteObject(object); }
+        return None;
+    }
+    let width = bitmap.bmWidth;
+    let height = bitmap.bmHeight;
+    let stride = ((width * 3 + 3) / 4) * 4;
+    let mut pixels = vec![0u8; stride as usize * height as usize];
+    let mut info = BITMAPINFO::default();
+    info.bmiHeader = BITMAPINFOHEADER {
+        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+        biWidth: width,
+        biHeight: height,
+        biPlanes: 1,
+        biBitCount: 24,
+        biCompression: BI_RGB.0,
+        biSizeImage: pixels.len() as u32,
+        ..Default::default()
+    };
+    let hdc = unsafe { GetDC(None) };
+    if hdc.is_invalid() {
+        unsafe { let _ = DeleteObject(object); }
+        return None;
+    }
+    let lines = unsafe {
+        GetDIBits(
+            hdc,
+            hbitmap,
+            0,
+            height as u32,
+            Some(pixels.as_mut_ptr() as *mut c_void),
+            &mut info,
+            DIB_RGB_COLORS,
+        )
+    };
+    unsafe {
+        ReleaseDC(None, hdc);
+        let _ = DeleteObject(object);
+    }
+    if lines == 0 {
+        return None;
+    }
+    let bmp = build_bmp(width, height, &pixels);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bmp);
+    Some(format!("data:image/bmp;base64,{encoded}"))
 }
 
 #[tauri::command]
@@ -962,16 +1047,7 @@ fn media_thumbnail(path: String, size: Option<u32>) -> Option<String> {
         return cached;
     }
 
-    // FFmpeg processes are short but CPU-heavy; serialise them so opening a list of recent
-    // files does not start eight encoders at once.
-    let _guard = thumbnail_lock().lock().ok()?;
-    if let Some(cached) = thumbnail_cache().lock().ok()?.get(&key).cloned() {
-        return cached;
-    }
-    let value = find_ffmpeg().and_then(|ffmpeg| {
-        extract_thumbnail(&ffmpeg, &path, size, "1")
-            .or_else(|| extract_thumbnail(&ffmpeg, &path, size, "0"))
-    });
+    let value = shell_thumbnail(&path, size);
     if let Ok(mut cache) = thumbnail_cache().lock() {
         if cache.len() > 128 {
             cache.clear();

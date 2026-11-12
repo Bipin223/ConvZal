@@ -406,6 +406,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "ureq",
+ "windows",
  "zip",
 ]
 
